@@ -5,8 +5,21 @@
     ":gitSignOff",
     "helpers:pinGitHubActionDigests"
   ],
+  // self-hosted configuration
+  "username": "cilium-renovate[bot]",
+  "repositories": ["cilium/cilium"],
+  // renovate first reads this configuration, then reads the repository
+  // configuration, since we don't split between the self-hosted and the
+  // repository configuration, this can lead to duplicate of some areas of the
+  // config, for example the regex. See:
+  // https://docs.renovatebot.com/self-hosted-configuration/#requireconfig
+  "requireConfig": "ignored",
+  "allowedPostUpgradeCommands": [
+    "^make -C install/kubernetes$",
+    "^go mod vendor$",
+  ],
   // This ensures that the gitAuthor and gitSignOff fields match
-  "gitAuthor": "renovate[bot] <bot@renovateapp.com>",
+  "gitAuthor": "cilium-renovate[bot] <134692979+cilium-renovate[bot]@users.noreply.github.com>",
   "includePaths": [
     ".github/actions/kvstore/**",
     ".github/actions/ginkgo/**",
@@ -42,10 +55,7 @@
     // 'google/oss-fuzz' is ignored from the updates because it's currently
     // unversioned and it would be receiving an update every time the upstream
     // repository would receive a new commit.
-    "google/oss-fuzz",
-    // Do not update GoBGP until https://github.com/osrg/gobgp/issues/2777
-    // is resolved and a new version is released.
-    "github.com/osrg/gobgp/v3"
+    "google/oss-fuzz"
   ],
   "pinDigests": true,
   "ignorePresets": [":prHourlyLimit2"],
@@ -163,7 +173,12 @@
         "github.com/cilium/controller-tools",
         "github.com/cilium/client-go",
         // We update this dependency manually together with envoy proxy updates
-        "github.com/cilium/proxy"
+        "github.com/cilium/proxy",
+        // Renovate automatically downgrades this dependency from tracking the
+        // master branch to the latest release. Ignore this dependency until a
+        // v2 release is out which is tracked with the following upstream issue:
+        // https://github.com/google/go-licenses/issues/205
+        "github.com/google/go-licenses"
       ],
       "matchPackagePatterns": [
         // We can't update these libraries until github.com/shoenig/go-m1cpu
@@ -196,7 +211,27 @@
     {
       "groupName": "spire-images",
       "matchFiles": [
-        "install/kubernetes/cilium/values.yaml.tmpl"
+        "install/kubernetes/Makefile.values"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/spiffe/spire-agent",
+        "ghcr.io/spiffe/spire-server"
+      ],
+      "matchBaseBranches": [
+        "main"
+      ],
+      "allowedVersions": ">1.6",
+      // generate files for helm chart
+      "postUpgradeTasks": {
+        "commands": ["make -C install/kubernetes"],
+        "fileFilters": ["**/**"],
+        "executionMode": "branch"
+      }
+    },
+    {
+      "groupName": "spire-images",
+      "matchFiles": [
+        "install/kubernetes/Makefile.values"
       ],
       "matchPackageNames": [
         "ghcr.io/spiffe/spire-agent",
@@ -205,7 +240,13 @@
       "matchBaseBranches": [
         "v1.14"
       ],
-      "allowedVersions": "<1.7"
+      "allowedVersions": "<1.7",
+      // generate files for helm chart
+      "postUpgradeTasks": {
+        "commands": ["make -C install/kubernetes"],
+        "fileFilters": ["**/**"],
+        "executionMode": "branch"
+      }
     },
     {
       "matchPackageNames": [
@@ -422,8 +463,11 @@
   "regexManagers": [
     {
       "fileMatch": [
-        "images/runtime/build-gops.sh",
-        "images/hubble-relay/download-grpc-health-probe.sh"
+        "images/cilium/download-hubble\\.sh",
+        "images/builder/install-protoc.sh",
+        "images/builder/install-protoplugins.sh",
+        "images/hubble-relay/download-grpc-health-probe.sh",
+        "images/runtime/build-gops.sh"
       ],
       // These regexes manage version and digest strings in shell scripts,
       // similar to the examples shown here:

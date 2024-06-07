@@ -5,12 +5,14 @@ package loader
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 
+	"github.com/cilium/ebpf"
+
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
-	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/mac"
@@ -64,7 +66,6 @@ type templateCfg struct {
 	// endpoint configuration, while the rest of the EndpointConfiguration
 	// interface is implemented directly here through receiver functions.
 	datapath.CompileTimeConfiguration
-	stats *metrics.SpanStat
 }
 
 // GetID returns a uint64, but in practice on the datapath side it is
@@ -129,20 +130,16 @@ func (t *templateCfg) GetPolicyVerdictLogFilter() uint32 {
 // it inside a templateCfg which hides static data from callers that wish to
 // generate header files based on the configuration, substituting it for
 // template data.
-func wrap(cfg datapath.CompileTimeConfiguration, stats *metrics.SpanStat) *templateCfg {
-	if stats == nil {
-		stats = &metrics.SpanStat{}
-	}
+func wrap(cfg datapath.CompileTimeConfiguration) *templateCfg {
 	return &templateCfg{
 		CompileTimeConfiguration: cfg,
-		stats:                    stats,
 	}
 }
 
-// elfMapSubstitutions returns the set of map substitutions that must occur in
+// ELFMapSubstitutions returns the set of map substitutions that must occur in
 // an ELF template object file to update map references for the specified
 // endpoint.
-func elfMapSubstitutions(ep datapath.Endpoint) map[string]string {
+func ELFMapSubstitutions(ep datapath.Endpoint) map[string]string {
 	result := make(map[string]string)
 	epID := uint16(ep.GetID())
 
@@ -165,18 +162,6 @@ func elfMapSubstitutions(ep datapath.Endpoint) map[string]string {
 			desiredStr := bpf.LocalMapName(name, epID)
 			result[templateStr] = desiredStr
 		}
-	}
-
-	// Populate the policy map if the host firewall is enabled regardless of the per-endpoint route setting
-	// because all routing is performed by the Linux stack with the chaining mode
-	// even if the per-endpoint route is disabled in the agent
-	if !ep.IsHost() || option.Config.EnableHostFirewall {
-		result[policymap.CallString(templateLxcID)] = policymap.CallString(epID)
-	}
-	// Egress policy map is only used when Envoy Config CRDs are enabled.
-	// Currently the Host EP does not use this.
-	if !ep.IsHost() && option.Config.EnableEnvoyConfig {
-		result[policymap.EgressCallString(templateLxcID)] = policymap.EgressCallString(epID)
 	}
 
 	return result
@@ -226,10 +211,10 @@ func sliceToBe64(input []byte) uint64 {
 	return byteorder.HostToNetwork64(sliceToU64(input))
 }
 
-// elfVariableSubstitutions returns the set of data substitutions that must
+// ELFVariableSubstitutions returns the set of data substitutions that must
 // occur in an ELF template object file to update static data for the specified
 // endpoint.
-func elfVariableSubstitutions(ep datapath.Endpoint) map[string]uint64 {
+func ELFVariableSubstitutions(ep datapath.Endpoint) map[string]uint64 {
 	result := make(map[string]uint64)
 
 	if ipv6 := ep.IPv6Address().AsSlice(); ipv6 != nil {
@@ -242,8 +227,8 @@ func elfVariableSubstitutions(ep datapath.Endpoint) map[string]uint64 {
 	}
 
 	mac := ep.GetNodeMAC()
-	result["NODE_MAC_1"] = uint64(sliceToBe32(mac[0:4]))
-	result["NODE_MAC_2"] = uint64(sliceToBe16(mac[4:6]))
+	result["THIS_INTERFACE_MAC_1"] = uint64(sliceToBe32(mac[0:4]))
+	result["THIS_INTERFACE_MAC_2"] = uint64(sliceToBe16(mac[4:6]))
 
 	if ep.IsHost() {
 		if option.Config.EnableNodePort {
@@ -276,12 +261,29 @@ func elfVariableSubstitutions(ep datapath.Endpoint) map[string]uint64 {
 	result["SECLABEL_NB"] = uint64(byteorder.HostToNetwork32(identity))
 	result["POLICY_VERDICT_LOG_FILTER"] = uint64(ep.GetPolicyVerdictLogFilter())
 	return result
-
 }
 
-// ELFSubstitutions fetches the set of variable and map substitutions that
-// must be implemented against an ELF template to configure the datapath for
-// the specified endpoint.
-func (l *loader) ELFSubstitutions(ep datapath.Endpoint) (map[string]uint64, map[string]string) {
-	return elfVariableSubstitutions(ep), elfMapSubstitutions(ep)
+func renameMaps(coll *ebpf.CollectionSpec, renames map[string]string) (*ebpf.CollectionSpec, error) {
+	// Shallow copy to avoid expensive copy of coll.Programs.
+	coll = &ebpf.CollectionSpec{
+		Maps:      maps.Clone(coll.Maps),
+		Programs:  coll.Programs,
+		Types:     coll.Types,
+		ByteOrder: coll.ByteOrder,
+	}
+
+	for name, rename := range renames {
+		mapSpec := coll.Maps[name]
+		if mapSpec == nil {
+			return nil, fmt.Errorf("unknown map %q: can't rename to %q", name, rename)
+		}
+
+		mapSpec = mapSpec.Copy()
+		// NB: We don't change maps[name] since that is referenced
+		// by instructions.
+		mapSpec.Name = rename
+		coll.Maps[name] = mapSpec
+	}
+
+	return coll, nil
 }

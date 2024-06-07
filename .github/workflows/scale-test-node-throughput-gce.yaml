@@ -36,12 +36,14 @@ concurrency:
 
 env:
   # renovate: datasource=golang-version depName=go
-  go_version: 1.22.2
+  go_version: 1.22.4
   # Adding k8s.local to the end makes kops happy-
   # has stricter DNS naming requirements.
   test_name: node-throughput
   cluster_base_name: ${{ github.run_id }}-${{ github.run_attempt }}.k8s.local
   GCP_PERF_RESULTS_BUCKET: gs://cilium-scale-results
+  # renovate: datasource=docker depName=google/cloud-sdk
+  gcloud_version: 478.0.0
 
 jobs:
   install-and-scaletest:
@@ -50,7 +52,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -88,12 +90,12 @@ jobs:
           done
 
       - name: Install Go
-        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7 # v5.0.1
         with:
           go-version: ${{ env.go_version }}
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@a9579d1afc528b085930c5237a69ee77b2c2be76 # v0.16.4
+        uses: cilium/cilium-cli@d86ae1ca5755139d6ca9423b9606cb047fc8e00f # v0.16.9
         with:
           repository: ${{ env.CILIUM_CLI_RELEASE_REPO }}
           release-version: ${{ env.CILIUM_CLI_VERSION }}
@@ -102,7 +104,7 @@ jobs:
         uses: cilium/scale-tests-action/install-kops@238d773bd07754bfd693a6b22c94eddf3a12778d # main
 
       - name: Setup gcloud credentials
-        uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        uses: google-github-actions/auth@71fee32a0bb7e97b4d33d548e7d957010649d8fa # v2.1.3
         with:
           workload_identity_provider: ${{ secrets.GCP_PERF_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_PERF_SA }}
@@ -113,10 +115,10 @@ jobs:
         uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: ${{ secrets.GCP_PERF_PROJECT_ID }}
-          version: "405.0.0"
+          version: ${{ env.gcloud_version }}
       
       - name: Clone ClusterLoader2
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           repository: kubernetes/perf-tests
           # Avoid using renovate to update this dependency because: (1)

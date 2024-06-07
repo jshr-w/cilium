@@ -4,7 +4,6 @@
 package bpf
 
 import (
-	"bytes"
 	"context"
 	"encoding"
 	"errors"
@@ -12,10 +11,15 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
-
-	"github.com/cilium/cilium/pkg/statedb"
-	"github.com/cilium/cilium/pkg/statedb/reconciler"
+	"github.com/cilium/statedb"
+	"github.com/cilium/statedb/reconciler"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
+
+// ErrMapNotOpened is returned when the MapOps is used with a BPF map that is not open yet.
+// In general this should be avoided and the map should be opened in a start hook before
+// the reconciler. If the map won't be used then the reconciler should not be started.
+var ErrMapNotOpened = errors.New("BPF map has not been opened")
 
 // KeyValue is the interface that an BPF map value object must implement.
 //
@@ -46,22 +50,33 @@ func (m StructBinaryMarshaler) MarshalBinary() ([]byte, error) {
 }
 
 type mapOps[KV KeyValue] struct {
-	m *ebpf.Map
+	m *Map
 }
 
-func NewMapOps2[KV KeyValue](m *ebpf.Map) reconciler.Operations[KV] {
+func NewMapOps[KV KeyValue](m *Map) reconciler.Operations[KV] {
 	ops := &mapOps[KV]{m}
 	return ops
 }
 
-func NewMapOps[KV KeyValue](m *Map) reconciler.Operations[KV] {
-	ops := &mapOps[KV]{m.m}
-	return ops
+func (ops *mapOps[KV]) withMap(do func(m *ebpf.Map) error) error {
+	ops.m.lock.RLock()
+	defer ops.m.lock.RUnlock()
+	if ops.m.m == nil {
+		return ErrMapNotOpened
+	}
+	return do(ops.m.m)
 }
 
 // Delete implements reconciler.Operations.
 func (ops *mapOps[KV]) Delete(ctx context.Context, txn statedb.ReadTxn, entry KV) error {
-	return ops.m.Delete(entry.BinaryKey())
+	return ops.withMap(func(m *ebpf.Map) error {
+		err := ops.m.m.Delete(entry.BinaryKey())
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			// Silently ignore deletions of non-existing keys.
+			return nil
+		}
+		return err
+	})
 }
 
 type keyIterator struct {
@@ -98,49 +113,27 @@ func (ops *mapOps[KV]) toStringKey(kv KV) string {
 	return string(key)
 }
 
-func (ops *mapOps[KV]) equalValue(b []byte, kv KV) bool {
-	value, _ := kv.BinaryValue().MarshalBinary()
-	return bytes.Equal(b, value)
-}
-
 // Prune BPF map values that do not exist in the table.
 func (ops *mapOps[KV]) Prune(ctx context.Context, txn statedb.ReadTxn, iter statedb.Iterator[KV]) error {
-	desiredKeys := statedb.CollectSet(statedb.Map(iter, func(kv KV) string { return ops.toStringKey(kv) }))
-	var errs []error
-	mapIter := &keyIterator{ops.m, nil, nil, ops.m.MaxEntries()}
-	for key := mapIter.Next(); key != nil; key = mapIter.Next() {
-		if !desiredKeys.Has(string(key)) {
-			if err := ops.m.Delete(key); err != nil {
-				errs = append(errs, err)
+	return ops.withMap(func(m *ebpf.Map) error {
+		desiredKeys := sets.New(statedb.Collect(statedb.Map(iter, func(kv KV) string { return ops.toStringKey(kv) }))...)
+		var errs []error
+		mapIter := &keyIterator{m, nil, nil, m.MaxEntries()}
+		for key := mapIter.Next(); key != nil; key = mapIter.Next() {
+			if !desiredKeys.Has(string(key)) {
+				if err := m.Delete(key); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
-	}
-	errs = append(errs, mapIter.Err())
-	return errors.Join(errs...)
+		errs = append(errs, mapIter.Err())
+		return errors.Join(errs...)
+	})
 }
 
 // Update the BPF map value to match with the object in the desired state table.
-func (ops *mapOps[KV]) Update(ctx context.Context, txn statedb.ReadTxn, entry KV, changed *bool) error {
-	if changed != nil {
-		// If changed is set, then we're doing a full reconciliation and we want to track
-		// whether the full reconciliation fixes anything. We figure out if a change is
-		// necessary by doing a lookup and comparing values.
-		var value []byte
-		err := ops.m.Lookup(entry.BinaryKey(), &value)
-		if err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				*changed = true
-			} else {
-				return err
-			}
-		} else {
-			*changed = !ops.equalValue(value, entry)
-		}
-		if *changed {
-			return ops.m.Put(entry.BinaryKey(), entry.BinaryValue())
-		}
-		return nil
-	} else {
-		return ops.m.Put(entry.BinaryKey(), entry.BinaryValue())
-	}
+func (ops *mapOps[KV]) Update(ctx context.Context, txn statedb.ReadTxn, entry KV) error {
+	return ops.withMap(func(m *ebpf.Map) error {
+		return m.Put(entry.BinaryKey(), entry.BinaryValue())
+	})
 }

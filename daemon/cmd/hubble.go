@@ -6,7 +6,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/go-openapi/strfmt"
@@ -16,11 +18,9 @@ import (
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/api/v1/models"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
-	cgroupManager "github.com/cilium/cilium/pkg/cgroups/manager"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/crypto/certloader"
 	"github.com/cilium/cilium/pkg/datapath/link"
-	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	"github.com/cilium/cilium/pkg/hubble/container"
 	"github.com/cilium/cilium/pkg/hubble/dropeventemitter"
 	"github.com/cilium/cilium/pkg/hubble/exporter"
@@ -30,6 +30,7 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/observer"
 	"github.com/cilium/cilium/pkg/hubble/observer/observeroption"
 	"github.com/cilium/cilium/pkg/hubble/parser"
+	hubbleGetters "github.com/cilium/cilium/pkg/hubble/parser/getters"
 	parserOptions "github.com/cilium/cilium/pkg/hubble/parser/options"
 	"github.com/cilium/cilium/pkg/hubble/peer"
 	"github.com/cilium/cilium/pkg/hubble/peer/serviceoption"
@@ -86,6 +87,18 @@ func (d *Daemon) getHubbleStatus(ctx context.Context) *models.HubbleStatus {
 	}
 
 	return hubbleStatus
+}
+
+func getPort(addr string) (int, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, fmt.Errorf("parse host address and port: %w", err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return 0, fmt.Errorf("parse port number: %w", err)
+	}
+	return portNum, nil
 }
 
 func (d *Daemon) launchHubble() {
@@ -272,6 +285,14 @@ func (d *Daemon) launchHubble() {
 	if option.Config.HubblePreferIpv6 {
 		peerServiceOptions = append(peerServiceOptions, serviceoption.WithAddressFamilyPreference(serviceoption.AddressPreferIPv6))
 	}
+	if addr := option.Config.HubbleListenAddress; addr != "" {
+		port, err := getPort(option.Config.HubbleListenAddress)
+		if err != nil {
+			logger.WithError(err).WithField("address", addr).Warn("Hubble server will not pass port information in change notificantions on exposed Hubble peer service")
+		} else {
+			peerServiceOptions = append(peerServiceOptions, serviceoption.WithHubblePort(port))
+		}
+	}
 	peerSvc := peer.NewService(d.nodeDiscovery.Manager, peerServiceOptions...)
 	localSrvOpts = append(localSrvOpts,
 		serveroption.WithUnixSocketListener(sockPath),
@@ -402,7 +423,7 @@ func (d *Daemon) GetIdentity(securityIdentity uint32) (*identity.Identity, error
 
 // GetEndpointInfo returns endpoint info for a given IP address. Hubble uses this function to populate
 // fields like namespace and pod name for local endpoints.
-func (d *Daemon) GetEndpointInfo(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+func (d *Daemon) GetEndpointInfo(ip netip.Addr) (endpoint hubbleGetters.EndpointInfo, ok bool) {
 	if !ip.IsValid() {
 		return nil, false
 	}
@@ -414,7 +435,7 @@ func (d *Daemon) GetEndpointInfo(ip netip.Addr) (endpoint v1.EndpointInfo, ok bo
 }
 
 // GetEndpointInfoByID returns endpoint info for a given Cilium endpoint id. Used by Hubble.
-func (d *Daemon) GetEndpointInfoByID(id uint16) (endpoint v1.EndpointInfo, ok bool) {
+func (d *Daemon) GetEndpointInfoByID(id uint16) (endpoint hubbleGetters.EndpointInfo, ok bool) {
 	ep := d.endpointManager.LookupCiliumID(id)
 	if ep == nil {
 		return nil, false
@@ -473,8 +494,4 @@ func (d *Daemon) GetServiceByAddr(ip netip.Addr, port uint16) *flowpb.Service {
 // Hubble's events buffer.
 func getHubbleEventBufferCapacity(logger logrus.FieldLogger) (container.Capacity, error) {
 	return container.NewCapacity(option.Config.HubbleEventBufferCapacity)
-}
-
-func (d *Daemon) GetParentPodMetadata(cgroupId uint64) *cgroupManager.PodMetadata {
-	return d.cgroupManager.GetPodMetadataForContainer(cgroupId)
 }

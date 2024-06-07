@@ -89,35 +89,48 @@ type policyOut struct {
 	IPCache    *ipcache.IPCache
 }
 
-// newPolicyTrifecta instantiates CachingIdentityAllocator, Repository and IPCache.
+// newPolicyTrifecta instantiates CachingIdentityAllocator, Repository and IPCache,
+// which in turn creates the SelectorCache and other policy components.
 //
-// The three have a circular dependency on each other and therefore require
+// The three have a complicated dependency on each other and therefore require
 // special care.
 func newPolicyTrifecta(params policyParams) (policyOut, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	if option.Config.EnableWellKnownIdentities {
 		// Must be done before calling policy.NewPolicyRepository() below.
 		num := identity.InitWellKnownIdentities(option.Config, params.ClusterInfo)
 		metrics.Identity.WithLabelValues(identity.WellKnownIdentityType).Add(float64(num))
 	}
-	iao := &identityAllocatorOwner{}
-	idAlloc := cache.NewCachingIdentityAllocator(iao)
 
-	iao.policy = policy.NewStoppedPolicyRepository(
-		idAlloc,
-		idAlloc.GetIdentityCache(),
+	// policy repository: maintains list of active Rules and their subject
+	// security identities. Also constructs the SelectorCache, a precomputed
+	// cache of label selector -> identities for policy peers.
+	repo := policy.NewStoppedPolicyRepository(
+		identity.ListReservedIdentities(), // Load SelectorCache with reserved identities
 		params.CertManager,
 		params.SecretManager,
 	)
-	iao.policy.SetEnvoyRulesFunc(envoy.GetEnvoyHTTPRules)
+	repo.SetEnvoyRulesFunc(envoy.GetEnvoyHTTPRules)
 
-	policyUpdater, err := policy.NewUpdater(iao.policy, params.EndpointManager)
-	if err != nil {
-		return policyOut{}, fmt.Errorf("failed to create policy update trigger: %w", err)
+	// policyUpdater: forces policy recalculation on all endpoints.
+	// Called for various events, such as named port changes
+	// or certain identity updates.
+	policyUpdater := policy.NewUpdater(repo, params.EndpointManager)
+
+	// iao: updates SelectorCache and regenerates endpoints when
+	// identity allocation / deallocation has occurred.
+	iao := &identityAllocatorOwner{
+		policy:        repo,
+		policyUpdater: policyUpdater,
 	}
-	iao.policyUpdater = policyUpdater
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Allocator: allocates local and cluster-wide security identities.
+	idAlloc := cache.NewCachingIdentityAllocator(iao)
+	idAlloc.EnableCheckpointing()
 
+	// IPCache: aggregates node-local prefix labels and allocates
+	// local identities. Generates incremental updates, pushes
+	// to endpoints.
 	ipc := ipcache.NewIPCache(&ipcache.Configuration{
 		Context:           ctx,
 		IdentityAllocator: idAlloc,
@@ -173,7 +186,7 @@ type identityAllocatorOwner struct {
 //
 // The caller is responsible for making sure the same identity is not
 // present in both 'added' and 'deleted'.
-func (iao *identityAllocatorOwner) UpdateIdentities(added, deleted cache.IdentityCache) {
+func (iao *identityAllocatorOwner) UpdateIdentities(added, deleted identity.IdentityMap) {
 	wg := &sync.WaitGroup{}
 	iao.policy.GetSelectorCache().UpdateIdentities(added, deleted, wg)
 	// Wait for update propagation to endpoints before triggering policy updates
@@ -279,6 +292,9 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 	// updated.
 	var policySelectionWG sync.WaitGroup
 
+	// newRev is the new policy revision after rule updates
+	var newRev uint64
+
 	// Get all endpoints at the time rules were added / updated so we can figure
 	// out which endpoints to regenerate / bump policy revision.
 	allEndpoints := d.endpointManager.GetPolicyEndpoints()
@@ -289,37 +305,69 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 
 	endpointsToRegen := policy.NewEndpointSet(nil)
 
-	if opts != nil {
-		if opts.Replace {
-			for _, r := range sourceRules {
-				oldRules := d.policy.SearchRLocked(r.Labels)
+	// Policies can be upserted one of two ways: by labels or by resource.
+	// Here we replace by resource if specified.
+	// This block of code is, sadly, copy-pasty because DeleteByLabels / AddList return an unexported type.
+	if opts != nil && opts.ReplaceByResource && len(opts.Resource) > 0 {
+		// Update the policy repository with the new rules
+		addedRules, deletedRules, rev := d.policy.ReplaceByResourceLocked(sourceRules, opts.Resource)
+		newRev = rev
+
+		if len(deletedRules) > 0 {
+			// Record any prefix allocations that should be deleted
+			removedPrefixes = append(removedPrefixes, policy.GetCIDRPrefixes(deletedRules.AsPolicyRules())...)
+
+			// Determine which endpoints, if any, need to be regenerated due to removing these rules
+			deletedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
+		}
+
+		// The information needed by the caller is available at this point, signal
+		// accordingly.
+		resChan <- &PolicyAddResult{
+			newRev: newRev,
+			err:    nil,
+		}
+
+		// Determine which endpoints, if any, need to be regenerated due to being selected by a new rule
+		addedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
+
+	} else {
+		// Replacing by labels
+		// This only happens if a policy is specified via the gRPC API. It is much less efficient
+		// due to needing to scan the entire repository to find matching labels.
+		if opts != nil {
+			if opts.Replace {
+				for _, r := range sourceRules {
+					oldRules := d.policy.SearchRLocked(r.Labels)
+					removedPrefixes = append(removedPrefixes, policy.GetCIDRPrefixes(oldRules)...)
+					if len(oldRules) > 0 {
+						deletedRules, _, _ := d.policy.DeleteByLabelsLocked(r.Labels)
+						deletedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
+					}
+				}
+			}
+			if len(opts.ReplaceWithLabels) > 0 {
+				oldRules := d.policy.SearchRLocked(opts.ReplaceWithLabels)
 				removedPrefixes = append(removedPrefixes, policy.GetCIDRPrefixes(oldRules)...)
 				if len(oldRules) > 0 {
-					deletedRules, _, _ := d.policy.DeleteByLabelsLocked(r.Labels)
+					deletedRules, _, _ := d.policy.DeleteByLabelsLocked(opts.ReplaceWithLabels)
 					deletedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
 				}
 			}
 		}
-		if len(opts.ReplaceWithLabels) > 0 {
-			oldRules := d.policy.SearchRLocked(opts.ReplaceWithLabels)
-			removedPrefixes = append(removedPrefixes, policy.GetCIDRPrefixes(oldRules)...)
-			if len(oldRules) > 0 {
-				deletedRules, _, _ := d.policy.DeleteByLabelsLocked(opts.ReplaceWithLabels)
-				deletedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
-			}
+
+		addedRules, rev := d.policy.AddListLocked(sourceRules)
+		newRev = rev
+
+		// The information needed by the caller is available at this point, signal
+		// accordingly.
+		resChan <- &PolicyAddResult{
+			newRev: newRev,
+			err:    nil,
 		}
+
+		addedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
 	}
-
-	addedRules, newRev := d.policy.AddListLocked(sourceRules)
-
-	// The information needed by the caller is available at this point, signal
-	// accordingly.
-	resChan <- &PolicyAddResult{
-		newRev: newRev,
-		err:    nil,
-	}
-
-	addedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
 
 	d.policy.Mutex.Unlock()
 
@@ -536,24 +584,42 @@ func (d *Daemon) policyDelete(labels labels.LabelArray, opts *policy.DeleteOptio
 
 	endpointsToRegen := policy.NewEndpointSet(nil)
 
-	deletedRules, rev, deleted := d.policy.DeleteByLabelsLocked(labels)
+	var deleted int
+	var rev uint64
+	var prefixes []netip.Prefix
 
-	// Return an error if a label filter was provided and there are no
-	// rules matching it. A deletion request for all policy entries should
-	// not fail if no policies are loaded.
-	if len(deletedRules) == 0 && len(labels) != 0 {
-		rev := d.policy.GetRevision()
-		d.policy.Mutex.Unlock()
+	if opts.DeleteByResource && len(opts.Resource) > 0 {
+		deletedRules, newRev := d.policy.DeleteByResourceLocked(opts.Resource)
+		rev = newRev
+		deleted = len(deletedRules)
 
-		err := api.New(DeletePolicyNotFoundCode, "policy not found")
+		deletedRules.UpdateRulesEndpointsCaches(epsToBumpRevision, endpointsToRegen, &policySelectionWG)
+		prefixes = policy.GetCIDRPrefixes(deletedRules.AsPolicyRules())
+	} else {
 
-		res <- &PolicyDeleteResult{
-			newRev: rev,
-			err:    err,
+		deletedRules, newRev, _ := d.policy.DeleteByLabelsLocked(labels)
+		rev = newRev
+		deleted = len(deletedRules)
+
+		// Return an error if a label filter was provided and there are no
+		// rules matching it. A deletion request for all policy entries should
+		// not fail if no policies are loaded.
+		if len(deletedRules) == 0 && len(labels) != 0 {
+			rev := d.policy.GetRevision()
+			d.policy.Mutex.Unlock()
+
+			err := api.New(DeletePolicyNotFoundCode, "policy not found")
+
+			res <- &PolicyDeleteResult{
+				newRev: rev,
+				err:    err,
+			}
+			return
 		}
-		return
+
+		deletedRules.UpdateRulesEndpointsCaches(epsToBumpRevision, endpointsToRegen, &policySelectionWG)
+		prefixes = policy.GetCIDRPrefixes(deletedRules.AsPolicyRules())
 	}
-	deletedRules.UpdateRulesEndpointsCaches(epsToBumpRevision, endpointsToRegen, &policySelectionWG)
 
 	res <- &PolicyDeleteResult{
 		newRev: rev,
@@ -568,7 +634,6 @@ func (d *Daemon) policyDelete(labels labels.LabelArray, opts *policy.DeleteOptio
 	// We don't treat failures to clean up identities as API failures,
 	// because the policy can still successfully be updated. We're just
 	// not appropriately performing garbage collection.
-	prefixes := policy.GetCIDRPrefixes(deletedRules.AsPolicyRules())
 	log.WithField("prefixes", prefixes).Debug("Policy deleted via API, found prefixes...")
 
 	// Updates to the datapath are serialized via the policy reaction queue.

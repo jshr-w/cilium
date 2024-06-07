@@ -63,9 +63,6 @@ var _ = Describe("K8sDatapathConfig", func() {
 				"bpf.monitorAggregation": "medium",
 				"bpf.monitorInterval":    "60s",
 				"bpf.monitorFlags":       "syn",
-				// Need to disable the host firewall for now due to complexity issue.
-				// See #14552 for details.
-				"hostFirewall.enabled": "false",
 			}, DeployCiliumOptionsAndDNS)
 
 			monitorRes, monitorCancel, targetIP := monitorConnectivityAcrossNodes(kubectl)
@@ -505,7 +502,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 			// IPs to be present on both nodes before performing the test
 			waitForAllowedIP := func(ciliumPod, ip string) {
 				jsonpath := fmt.Sprintf(`{.encryption.wireguard.interfaces[*].peers[*].allowed-ips[?(@=='%s')]}`, ip)
-				ciliumCmd := fmt.Sprintf(`cilium debuginfo --output jsonpath="%s"`, jsonpath)
+				ciliumCmd := fmt.Sprintf(`cilium-dbg debuginfo --output jsonpath="%s"`, jsonpath)
 				expected := fmt.Sprintf("jsonpath=%s", ip)
 				err := kubectl.CiliumExecUntilMatch(ciliumPod, ciliumCmd, expected)
 				Expect(err).To(BeNil(), "ip %q not in allowedIPs of pod %q", ip, ciliumPod)

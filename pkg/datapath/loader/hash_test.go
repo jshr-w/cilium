@@ -15,19 +15,14 @@ import (
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/config"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	"github.com/cilium/cilium/pkg/datapath/tables"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/maps/nodemap/fake"
-	"github.com/cilium/cilium/pkg/statedb"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
 var (
-	dummyNodeCfg = datapath.LocalNodeConfiguration{
-		MtuConfig: &fakeTypes.MTU{},
-	}
 	dummyDevCfg = testutils.NewTestEndpoint()
 	dummyEPCfg  = testutils.NewTestEndpoint()
 )
@@ -35,21 +30,15 @@ var (
 // TestHashDatapath is done in this package just for easy access to dummy
 // configuration objects.
 func TestHashDatapath(t *testing.T) {
-	setupLocalNodeStore(t)
-
 	var cfg datapath.ConfigWriter
 	hv := hive.New(
 		provideNodemap,
 		cell.Provide(
-			fakeTypes.NewNodeAddressing,
+			func() datapath.BandwidthManager { return &fakeTypes.BandwidthManager{} },
 			func() sysctl.Sysctl { return sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc") },
-			tables.NewDeviceTable,
-			func(_ *statedb.DB, devices statedb.RWTable[*tables.Device]) statedb.Table[*tables.Device] {
-				return devices
-			},
 			config.NewHeaderfileWriter,
+			fakeTypes.NewNodeAddressing,
 		),
-		cell.Invoke(statedb.RegisterTable[*tables.Device]),
 		cell.Invoke(func(writer_ datapath.ConfigWriter) {
 			cfg = writer_
 		}),
@@ -63,7 +52,7 @@ func TestHashDatapath(t *testing.T) {
 	baseHash := h.String()
 
 	// Ensure we get different hashes when config is added
-	h = hashDatapath(cfg, &dummyNodeCfg, &dummyDevCfg, &dummyEPCfg)
+	h = hashDatapath(cfg, &localNodeConfig, &dummyDevCfg, &dummyEPCfg)
 	dummyHash := h.String()
 	require.NotEqual(t, dummyHash, baseHash)
 
@@ -74,7 +63,7 @@ func TestHashDatapath(t *testing.T) {
 
 	// Ensure that with a copy of the endpoint config we get the same hash
 	newEPCfg := dummyEPCfg
-	h = hashDatapath(cfg, &dummyNodeCfg, &dummyDevCfg, &newEPCfg)
+	h = hashDatapath(cfg, &localNodeConfig, &dummyDevCfg, &newEPCfg)
 	require.NotEqual(t, h.String(), baseHash)
 	require.Equal(t, h.String(), dummyHash)
 
@@ -83,14 +72,14 @@ func TestHashDatapath(t *testing.T) {
 	// This is the key to avoiding recompilation per endpoint; static
 	// data substitution is performed via pkg/elf instead.
 	newEPCfg.Id++
-	h = hashDatapath(cfg, &dummyNodeCfg, &dummyDevCfg, &newEPCfg)
+	h = hashDatapath(cfg, &localNodeConfig, &dummyDevCfg, &newEPCfg)
 	require.NotEqual(t, h.String(), baseHash)
 	require.Equal(t, h.String(), dummyHash)
 
 	// But when we configure the endpoint differently, it's different
 	newEPCfg = testutils.NewTestEndpoint()
 	newEPCfg.Opts.SetBool("foo", true)
-	h = hashDatapath(cfg, &dummyNodeCfg, &dummyDevCfg, &newEPCfg)
+	h = hashDatapath(cfg, &localNodeConfig, &dummyDevCfg, &newEPCfg)
 	require.NotEqual(t, h.String(), baseHash)
 	require.NotEqual(t, h.String(), dummyHash)
 }

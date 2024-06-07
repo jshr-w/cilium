@@ -241,6 +241,7 @@
 /.github/workflows/*hubble*.yaml @cilium/sig-hubble @cilium/github-sec @cilium/ci-structure
 /.github/workflows/*ipsec*.yaml @cilium/ipsec @cilium/github-sec @cilium/ci-structure
 /.github/workflows/*ingress*.yaml @cilium/sig-servicemesh @cilium/github-sec @cilium/ci-structure
+/.github/actions/cl2-modules/ @cilium/sig-scalability
 /.github/workflows/*scale*.yaml @cilium/sig-scalability @cilium/github-sec @cilium/ci-structure
 /.github/workflows/*perf*.yaml @cilium/sig-scalability @cilium/github-sec @cilium/ci-structure
 /.gitignore @cilium/contributing
@@ -276,6 +277,7 @@ Makefile* @cilium/build
 /cilium-health/cmd/ @cilium/sig-agent @cilium/cli
 /clustermesh-apiserver @cilium/sig-clustermesh
 /contrib/ @cilium/contributing
+/contrib/containerlab/ @cilium/sig-bgp
 /contrib/vagrant/ @cilium/contributing
 /contrib/coccinelle/ @cilium/sig-datapath
 /daemon/ @cilium/sig-agent
@@ -343,6 +345,7 @@ Makefile* @cilium/build
 /Documentation/network/kubernetes/ipam* @cilium/sig-ipam @cilium/docs-structure
 /Documentation/network/kubernetes/kubeproxy-free.rst @cilium/sig-lb @cilium/docs-structure
 /Documentation/network/lb-ipam.rst @cilium/sig-lb @cilium/docs-structure
+/Documentation/network/multicast.rst @cilium/sig-datapath @cilium/docs-structure
 /Documentation/network/servicemesh/ @cilium/sig-servicemesh @cilium/docs-structure
 /Documentation/observability/ @cilium/sig-policy @cilium/docs-structure
 /Documentation/operations/performance/ @cilium/sig-datapath @cilium/docs-structure
@@ -389,12 +392,14 @@ Makefile* @cilium/build
 /netlify.toml @cilium/ci-structure
 /operator/ @cilium/operator
 /operator/pkg/bgpv2 @cilium/sig-bgp
+/operator/pkg/ciliumendpointslice @cilium/sig-scalability
 /operator/pkg/ciliumenvoyconfig @cilium/sig-servicemesh
 /operator/pkg/controller-runtime @cilium/sig-servicemesh
 /operator/pkg/gateway-api @cilium/sig-servicemesh
 /operator/pkg/ingress @cilium/sig-servicemesh
 /operator/pkg/lbipam @cilium/sig-lb
 /operator/pkg/model @cilium/sig-servicemesh
+/operator/pkg/networkpolicy @cilium/sig-policy
 /operator/pkg/secretsync @cilium/sig-servicemesh
 /operator/watchers/bgp.go @cilium/sig-bgp
 /pkg/annotation @cilium/sig-k8s
@@ -412,7 +417,6 @@ Makefile* @cilium/build
 /pkg/bpf/ @cilium/loader
 /pkg/byteorder/ @cilium/sig-datapath @cilium/api
 /pkg/cgroups/ @cilium/sig-datapath
-/pkg/checker/ @cilium/ci-structure
 /pkg/cidr/ @cilium/sig-agent
 /pkg/ciliumenvoyconfig/ @cilium/envoy @cilium/sig-servicemesh
 /pkg/cleanup/ @cilium/sig-agent
@@ -447,7 +451,6 @@ Makefile* @cilium/build
 /pkg/debug @cilium/sig-agent
 /pkg/ebpf @cilium/sig-datapath
 /pkg/egressgateway/ @cilium/egress-gateway
-/pkg/elf @cilium/loader
 /pkg/endpoint/ @cilium/endpoint
 /pkg/endpointcleanup/ @cilium/endpoint
 /pkg/endpointmanager/ @cilium/endpoint
@@ -458,7 +461,6 @@ Makefile* @cilium/build
 /pkg/fqdn/ @cilium/fqdn
 /pkg/fswatcher/ @cilium/sig-datapath @cilium/sig-hubble
 /pkg/gops/ @cilium/sig-agent
-/pkg/healthv2/ @cilium/sig-foundations
 /pkg/health/ @cilium/sig-agent
 /pkg/hive/ @cilium/sig-foundations
 /pkg/hubble/ @cilium/sig-hubble
@@ -499,6 +501,7 @@ Makefile* @cilium/build
 /pkg/metrics @cilium/metrics
 /pkg/monitor @cilium/sig-datapath
 /pkg/monitor/api @cilium/api @cilium/sig-datapath
+/pkg/monitor/datapath_trace.go @cilium/sig-datapath @cilium/sig-hubble
 /pkg/monitor/format @cilium/cli @cilium/sig-datapath
 /pkg/monitor/payload @cilium/api @cilium/sig-datapath
 /pkg/mountinfo @cilium/sig-datapath
@@ -520,7 +523,6 @@ Makefile* @cilium/build
 /pkg/proxy/accesslog @cilium/proxy @cilium/api
 /pkg/proxy/dns.go @cilium/proxy @cilium/fqdn
 /pkg/proxy/envoyproxy.go @cilium/proxy @cilium/envoy
-/pkg/rand/ @cilium/sig-agent
 /pkg/rate/ @cilium/sig-agent
 /pkg/rate/metrics @cilium/metrics
 /pkg/recorder @cilium/sig-datapath
@@ -536,7 +538,6 @@ Makefile* @cilium/build
 /pkg/source @cilium/ipcache
 /pkg/spanstat/ @cilium/sig-agent
 /pkg/status/ @cilium/sig-agent
-/pkg/statedb @cilium/sig-foundations
 /pkg/testutils/ @cilium/ci-structure
 /pkg/time @cilium/sig-agent
 /pkg/trigger/ @cilium/sig-agent
@@ -595,4 +596,3 @@ Vagrantfile @cilium/ci-structure
 /vendor/ @cilium/vendor
 /VERSION @cilium/release-managers
 /.clang-format @cilium/contributing
-/.openvex.json @cilium/security

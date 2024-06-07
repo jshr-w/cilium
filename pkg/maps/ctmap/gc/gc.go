@@ -9,9 +9,11 @@ import (
 	"os"
 
 	"github.com/cilium/hive/cell"
+	"github.com/cilium/statedb"
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/inctimer"
@@ -37,9 +39,10 @@ type PerClusterCTMapsRetriever func() []*ctmap.Map
 type parameters struct {
 	cell.In
 
-	Lifecycle cell.Lifecycle
-	Logger    logrus.FieldLogger
-
+	Lifecycle       cell.Lifecycle
+	Logger          logrus.FieldLogger
+	DB              *statedb.DB
+	NodeAddrs       statedb.Table[tables.NodeAddress]
 	DaemonConfig    *option.DaemonConfig
 	EndpointManager EndpointManager
 	Datapath        types.Datapath
@@ -53,6 +56,9 @@ type GC struct {
 
 	ipv4 bool
 	ipv6 bool
+
+	db        *statedb.DB
+	nodeAddrs statedb.Table[tables.NodeAddress]
 
 	endpointsManager EndpointManager
 	nodeAddressing   types.NodeAddressing
@@ -68,6 +74,9 @@ func New(params parameters) *GC {
 
 		ipv4: params.DaemonConfig.EnableIPv4,
 		ipv6: params.DaemonConfig.EnableIPv6,
+
+		db:        params.DB,
+		nodeAddrs: params.NodeAddrs,
 
 		endpointsManager: params.EndpointManager,
 		nodeAddressing:   params.Datapath.LocalNodeAddressing(),
@@ -163,9 +172,10 @@ func (gc *GC) Enable() {
 			}
 
 			// Mark the CT GC as over in each EP DNSZombies instance, if we did a *full* GC run
+			interval := ctmap.GetInterval(gcInterval, maxDeleteRatio)
 			if success && ipv4 == gc.ipv4 && ipv6 == gc.ipv6 {
 				for _, e := range eps {
-					e.MarkCTGCTime(gcStart)
+					e.MarkCTGCTime(gcStart, time.Now().Add(interval))
 				}
 			}
 
@@ -198,7 +208,7 @@ func (gc *GC) Enable() {
 						ipv6 = true
 					}
 				}
-			case <-ctTimer.After(ctmap.GetInterval(gcInterval, maxDeleteRatio)):
+			case <-ctTimer.After(interval):
 				gc.signalHandler.MuteSignals()
 				ipv4 = gc.ipv4
 				ipv6 = gc.ipv6

@@ -205,6 +205,11 @@ func (p *DNSProxy) checkRestored(endpointID uint64, destPortProto restore.PortPr
 	if !exists && destPortProto.IsPortV2() {
 		// Check if there is a Version 1 restore.
 		ipRules, exists = p.restored[endpointID][destPortProto.ToV1()]
+		log.WithFields(logrus.Fields{
+			logfields.EndpointID: endpointID,
+			logfields.Port:       destPortProto.Port(),
+			logfields.Protocol:   destPortProto.Protocol(),
+		}).Debugf("Checking if restored V1 IP rules (exists: %t) for endpoint: %+v", exists, ipRules)
 		if !exists {
 			return false
 		}
@@ -514,6 +519,14 @@ func (allow perEPAllow) setPortRulesForIDFromUnifiedFormat(cache regexCache, end
 // passed-in endpointID and destPort with setPortRulesForID
 func (allow perEPAllow) getPortRulesForID(endpointID uint64, destPortProto restore.PortProto) (rules CachedSelectorREEntry, exists bool) {
 	rules, exists = allow[endpointID][destPortProto]
+	if !exists && destPortProto.Protocol() != 0 {
+		rules, exists = allow[endpointID][destPortProto.ToV1()]
+		log.WithFields(logrus.Fields{
+			logfields.EndpointID: endpointID,
+			logfields.Port:       destPortProto.Port(),
+			logfields.Protocol:   destPortProto.Protocol(),
+		}).Debugf("Checking for V1 port rule (exists: %t) for endpoint: %+v", exists, rules)
+	}
 	return
 }
 
@@ -602,6 +615,18 @@ func (proxyStat *ProxyRequestContext) IsTimeout() bool {
 	return false
 }
 
+// DNSProxyConfig is the configuration for the DNS proxy.
+type DNSProxyConfig struct {
+	Address                string
+	Port                   uint16
+	IPv4                   bool
+	IPv6                   bool
+	EnableDNSCompression   bool
+	MaxRestoreDNSIPs       int
+	ConcurrencyLimit       int
+	ConcurrencyGracePeriod time.Duration
+}
+
 // StartDNSProxy starts a proxy used for DNS L7 redirects that listens on
 // address and port on IPv4 and/or IPv6 depending on the values of ipv4/ipv6.
 // address is the bind address to listen on. Empty binds to all local
@@ -614,17 +639,13 @@ func (proxyStat *ProxyRequestContext) IsTimeout() bool {
 // requesting endpoint. Note that denied requests will not trigger this
 // callback.
 func StartDNSProxy(
-	address string, port uint16,
-	ipv4 bool, ipv6 bool,
-	enableDNSCompression bool,
-	maxRestoreDNSIPs int,
+	dnsProxyConfig DNSProxyConfig,
 	lookupEPFunc LookupEndpointIDByIPFunc,
 	lookupSecIDFunc LookupSecIDByIPFunc,
 	lookupIPsFunc LookupIPsBySecIDFunc,
 	notifyFunc NotifyOnDNSMsgFunc,
-	concurrencyLimit int, concurrencyGracePeriod time.Duration,
 ) (*DNSProxy, error) {
-	if port == 0 {
+	if dnsProxyConfig.Port == 0 {
 		log.Debug("DNS Proxy port is configured to 0. A random port will be assigned by the OS.")
 	}
 
@@ -644,13 +665,13 @@ func StartDNSProxy(
 		restored:                 make(perEPRestored),
 		restoredEPs:              make(restoredEPs),
 		cache:                    make(regexCache),
-		EnableDNSCompression:     enableDNSCompression,
-		maxIPsPerRestoredDNSRule: maxRestoreDNSIPs,
+		EnableDNSCompression:     dnsProxyConfig.EnableDNSCompression,
+		maxIPsPerRestoredDNSRule: dnsProxyConfig.MaxRestoreDNSIPs,
 		DNSClients:               dns.NewSharedClients(),
 	}
-	if concurrencyLimit > 0 {
-		p.ConcurrencyLimit = semaphore.NewWeighted(int64(concurrencyLimit))
-		p.ConcurrencyGracePeriod = concurrencyGracePeriod
+	if dnsProxyConfig.ConcurrencyLimit > 0 {
+		p.ConcurrencyLimit = semaphore.NewWeighted(int64(dnsProxyConfig.ConcurrencyLimit))
+		p.ConcurrencyGracePeriod = dnsProxyConfig.ConcurrencyGracePeriod
 	}
 	p.rejectReply.Store(dns.RcodeRefused)
 
@@ -663,7 +684,7 @@ func StartDNSProxy(
 
 	start := time.Now()
 	for time.Since(start) < ProxyBindTimeout {
-		dnsServers, bindPort, err = bindToAddr(address, port, p, ipv4, ipv6)
+		dnsServers, bindPort, err = bindToAddr(dnsProxyConfig.Address, dnsProxyConfig.Port, p, dnsProxyConfig.IPv4, dnsProxyConfig.IPv6)
 		if err == nil {
 			break
 		}

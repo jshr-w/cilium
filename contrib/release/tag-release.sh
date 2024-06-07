@@ -7,8 +7,6 @@ source $DIR/lib/common.sh
 source $DIR/../backporting/common.sh
 
 REMOTE="$(get_remote)"
-CHARTS_PATH="${CHARTS_PATH:-$GOPATH/src/github.com/cilium/charts}"
-CHARTS_TOOL="prepare_artifacts.sh"
 RELEASES_URL="https://github.com/cilium/cilium/releases"
 VERSION=""
 
@@ -29,13 +27,8 @@ handle_args() {
         common::exit 1 "VERSION file not found. Is this directory a Cilium repository?"
     fi
 
-    if [[ ! -e "$CHARTS_PATH/$CHARTS_TOOL" ]]; then
-        usage
-        common::exit 1 "CHARTS_PATH='$CHARTS_PATH' invalid. Clone from github.com/cilium/charts"
-    fi
-
-    if ! which hub >/dev/null; then
-        echo "This tool relies on 'hub' from https://github.com/github/hub ." 1>&2
+    if ! which gh >/dev/null; then
+        echo "This tool relies on 'gh' from https://cli.github.com/ ." 1>&2
         common::exit 1 "Please install this tool first."
     fi
 

@@ -4,7 +4,9 @@
 package annotations
 
 import (
+	"fmt"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -15,12 +17,14 @@ import (
 
 const (
 	LBModeAnnotation           = annotation.IngressPrefix + "/loadbalancer-mode"
+	LBClassAnnotation          = annotation.IngressPrefix + "/loadbalancer-class"
 	ServiceTypeAnnotation      = annotation.IngressPrefix + "/service-type"
 	InsecureNodePortAnnotation = annotation.IngressPrefix + "/insecure-node-port"
 	SecureNodePortAnnotation   = annotation.IngressPrefix + "/secure-node-port"
 	HostListenerPortAnnotation = annotation.IngressPrefix + "/host-listener-port"
 	TLSPassthroughAnnotation   = annotation.IngressPrefix + "/tls-passthrough"
 	ForceHTTPSAnnotation       = annotation.IngressPrefix + "/force-https"
+	RequestTimeoutAnnotation   = annotation.IngressPrefix + "/request-timeout"
 
 	LBModeAnnotationAlias           = annotation.Prefix + ".ingress" + "/loadbalancer-mode"
 	ServiceTypeAnnotationAlias      = annotation.Prefix + ".ingress" + "/service-type"
@@ -50,6 +54,16 @@ func GetAnnotationIngressLoadbalancerMode(ingress *networkingv1.Ingress) string 
 	return value
 }
 
+// GetAnnotationLoadBalancerClass returns the loadbalancer class from the ingress if possible.
+// Defaults to nil
+func GetAnnotationLoadBalancerClass(ingress *networkingv1.Ingress) *string {
+	val, exists := annotation.Get(ingress, LBClassAnnotation)
+	if !exists {
+		return nil
+	}
+	return &val
+}
+
 // GetAnnotationServiceType returns the service type for the ingress if possible.
 // Defaults to LoadBalancer
 func GetAnnotationServiceType(ingress *networkingv1.Ingress) string {
@@ -58,6 +72,21 @@ func GetAnnotationServiceType(ingress *networkingv1.Ingress) string {
 		return string(corev1.ServiceTypeLoadBalancer)
 	}
 	return val
+}
+
+// GetAnnotationRequestTimeout retrieves the RequestTimeout annotation's value.
+func GetAnnotationRequestTimeout(ingress *networkingv1.Ingress) (*time.Duration, error) {
+	val, exists := annotation.Get(ingress, RequestTimeoutAnnotation)
+	if !exists {
+		return nil, nil
+	}
+
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse duration %q: %w", val, err)
+	}
+
+	return &d, nil
 }
 
 // GetAnnotationSecureNodePort returns the secure node port for the ingress if possible.

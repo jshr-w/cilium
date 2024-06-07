@@ -41,22 +41,19 @@ struct bpf_elf_map __section_maps POLICY_CALL_MAP = {
 };
 
 static __always_inline __must_check int
-tail_call_policy_dynamic(struct __ctx_buff *ctx, __u16 endpoint_id)
+tail_call_policy(struct __ctx_buff *ctx, __u16 endpoint_id)
 {
-	tail_call_dynamic(ctx, &POLICY_CALL_MAP, endpoint_id);
+	if (__builtin_constant_p(endpoint_id)) {
+		tail_call_static(ctx, POLICY_CALL_MAP, endpoint_id);
+	} else {
+		tail_call_dynamic(ctx, &POLICY_CALL_MAP, endpoint_id);
+	}
+
 	/* When forwarding from a BPF program to some endpoint,
 	 * there are inherent races that can result in the endpoint's
 	 * policy program being unavailable (eg. if the endpoint is
 	 * terminating).
 	 */
-	return DROP_EP_NOT_READY;
-}
-
-static __always_inline __must_check int
-tail_call_policy_static(struct __ctx_buff *ctx, __u16 endpoint_id)
-{
-	tail_call_static(ctx, POLICY_CALL_MAP, endpoint_id);
-	/* see above */
 	return DROP_EP_NOT_READY;
 }
 #endif /* SKIP_POLICY_MAP */
@@ -205,14 +202,6 @@ struct {
 } IPCACHE_MAP __section_maps_btf;
 
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, __u32);
-	__type(value, struct encrypt_config);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(max_entries, 1);
-} ENCRYPT_MAP __section_maps_btf;
-
-struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct node_key);
 	__type(value, __u16);
@@ -286,24 +275,13 @@ struct {							\
 	__uint(map_flags, BPF_F_NO_PREALLOC);			\
 } SRV6_POLICY_MAP ## IP_FAMILY __section_maps_btf;
 
-# define SRV6_STATE_MAP(IP_FAMILY)							\
-struct {										\
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);						\
-	__type(key, struct srv6_ipv ## IP_FAMILY ## _2tuple); /* inner header */	\
-	__type(value, struct srv6_ipv6_2tuple);               /* outer header */	\
-	__uint(pinning, LIBBPF_PIN_BY_NAME);						\
-	__uint(max_entries, SRV6_STATE_MAP_SIZE);					\
-} SRV6_STATE_MAP ## IP_FAMILY __section_maps_btf;
-
 # ifdef ENABLE_IPV4
 SRV6_VRF_MAP(4)
 SRV6_POLICY_MAP(4)
-SRV6_STATE_MAP(4)
 # endif /* ENABLE_IPV4 */
 
 SRV6_VRF_MAP(6)
 SRV6_POLICY_MAP(6)
-SRV6_STATE_MAP(6)
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);

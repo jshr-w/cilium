@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
-	. "github.com/cilium/checkmate"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
@@ -18,15 +18,16 @@ import (
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { TestingT(t) }
+func setupIPSecSuitePrivileged(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
+	node.SetTestLocalNodeStore()
+	err := rlimit.RemoveMemlock()
+	require.NoError(tb, err)
 
-type IPSecSuitePrivileged struct{}
-
-var _ = Suite(&IPSecSuitePrivileged{})
-
-func (s *IPSecSuitePrivileged) SetUpSuite(c *C) {
-	testutils.PrivilegedTest(c)
+	tb.Cleanup(func() {
+		node.UnsetTestLocalNodeStore()
+		_ = DeleteXFRM()
+	})
 }
 
 var (
@@ -36,50 +37,46 @@ var (
 	invalidKeysDat = []byte("1 test abcdefghijklmnopqrstuvwzyzABCDEF test abcdefghijklmnopqrstuvwzyzABCDEF\n")
 )
 
-func (p *IPSecSuitePrivileged) SetUpTest(c *C) {
-	node.SetTestLocalNodeStore()
-	err := rlimit.RemoveMemlock()
-	c.Assert(err, IsNil)
-}
-
-func (p *IPSecSuitePrivileged) TearDownTest(c *C) {
-	node.UnsetTestLocalNodeStore()
-	_ = DeleteXfrm()
-}
-
-func (p *IPSecSuitePrivileged) TestLoadKeysNoFile(c *C) {
+func TestLoadKeysNoFile(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
 	_, _, err := LoadIPSecKeysFile(path)
-	c.Assert(os.IsNotExist(err), Equals, true)
+	require.Equal(t, true, os.IsNotExist(err))
 }
 
-func (p *IPSecSuitePrivileged) TestInvalidLoadKeys(c *C) {
+func TestInvalidLoadKeys(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	keys := bytes.NewReader(invalidKeysDat)
 	_, _, err := LoadIPSecKeys(keys)
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 
 	_, local, err := net.ParseCIDR("1.1.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, remote, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, NotNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.Error(t, err)
 }
 
-func (p *IPSecSuitePrivileged) TestLoadKeys(c *C) {
+func TestLoadKeys(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	keys := bytes.NewReader(keysDat)
 	_, spi, err := LoadIPSecKeys(keys)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = SetIPSecSPI(spi)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	keys = bytes.NewReader(keysAeadDat)
 	_, spi, err = LoadIPSecKeys(keys)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = SetIPSecSPI(spi)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
-func (p *IPSecSuitePrivileged) TestParseSPI(c *C) {
+func TestParseSPI(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	testCases := []struct {
 		input    string
 		expSPI   uint8
@@ -96,32 +93,34 @@ func (p *IPSecSuitePrivileged) TestParseSPI(c *C) {
 	for _, tc := range testCases {
 		spi, off, esn, err := parseSPI(tc.input)
 		if spi != tc.expSPI {
-			c.Fatalf("For input %q, expected SPI %d, but got %d", tc.input, tc.expSPI, spi)
+			t.Fatalf("For input %q, expected SPI %d, but got %d", tc.input, tc.expSPI, spi)
 		}
 		if off != tc.expOff {
-			c.Fatalf("For input %q, expected base offset %d, but got %d", tc.input, tc.expOff, off)
+			t.Fatalf("For input %q, expected base offset %d, but got %d", tc.input, tc.expOff, off)
 		}
 		if esn != tc.expESN {
-			c.Fatalf("For input %q, expected ESN %t, but got %t", tc.input, tc.expESN, esn)
+			t.Fatalf("For input %q, expected ESN %t, but got %t", tc.input, tc.expESN, esn)
 		}
 		if tc.expError {
-			c.Assert(err, NotNil)
+			require.Error(t, err)
 		} else {
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 		}
 	}
 }
 
-func (p *IPSecSuitePrivileged) TestUpsertIPSecEquals(c *C) {
+func TestUpsertIPSecEquals(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	_, local, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, remote, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	_, authKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, cryptKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	key := &ipSecKey{
 		Spi:   1,
 		ReqID: 1,
@@ -132,13 +131,13 @@ func (p *IPSecSuitePrivileged) TestUpsertIPSecEquals(c *C) {
 	ipSecKeysGlobal["1.2.3.4"] = key
 	ipSecKeysGlobal[""] = key
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 
 	_, aeadKey, err := decodeIPSecKey("44434241343332312423222114131211f4f3f2f1")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	key = &ipSecKey{
 		Spi:   1,
 		ReqID: 1,
@@ -150,24 +149,26 @@ func (p *IPSecSuitePrivileged) TestUpsertIPSecEquals(c *C) {
 	ipSecKeysGlobal["1.2.3.4"] = key
 	ipSecKeysGlobal[""] = key
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 	ipSecKeysGlobal["1.2.3.4"] = nil
 	ipSecKeysGlobal[""] = nil
 }
 
-func (p *IPSecSuitePrivileged) TestUpsertIPSecEndpoint(c *C) {
+func TestUpsertIPSecEndpoint(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	_, local, err := net.ParseCIDR("1.1.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, remote, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	_, authKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, cryptKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	key := &ipSecKey{
 		Spi:   1,
 		ReqID: 1,
@@ -179,13 +180,13 @@ func (p *IPSecSuitePrivileged) TestUpsertIPSecEndpoint(c *C) {
 	ipSecKeysGlobal["1.2.3.4"] = key
 	ipSecKeysGlobal[""] = key
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 
 	_, aeadKey, err := decodeIPSecKey("44434241343332312423222114131211f4f3f2f1")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	key = &ipSecKey{
 		Spi:   1,
 		ReqID: 1,
@@ -198,12 +199,12 @@ func (p *IPSecSuitePrivileged) TestUpsertIPSecEndpoint(c *C) {
 	ipSecKeysGlobal["1.2.3.4"] = key
 	ipSecKeysGlobal[""] = key
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 
 	// Assert additional rule when tunneling is enabled is inserted
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 	toProxyPolicy, err := netlink.XfrmPolicyGet(&netlink.XfrmPolicy{
 		Src: remote,
 		Dst: local,
@@ -213,37 +214,41 @@ func (p *IPSecSuitePrivileged) TestUpsertIPSecEndpoint(c *C) {
 			Value: linux_defaults.RouteMarkToProxy,
 		},
 	})
-	c.Assert(err, IsNil)
-	c.Assert(toProxyPolicy, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, toProxyPolicy)
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 	ipSecKeysGlobal["1.1.3.4"] = nil
 	ipSecKeysGlobal["1.2.3.4"] = nil
 	ipSecKeysGlobal[""] = nil
 }
 
-func (p *IPSecSuitePrivileged) TestUpsertIPSecKeyMissing(c *C) {
+func TestUpsertIPSecKeyMissing(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	_, local, err := net.ParseCIDR("1.1.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, remote, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, ErrorMatches, "unable to replace local state: IPSec key missing")
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.ErrorContains(t, err, "unable to replace local state: IPSec key missing")
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 }
 
-func (p *IPSecSuitePrivileged) TestUpdateExistingIPSecEndpoint(c *C) {
+func TestUpdateExistingIPSecEndpoint(t *testing.T) {
+	setupIPSecSuitePrivileged(t)
+
 	_, local, err := net.ParseCIDR("1.1.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, remote, err := net.ParseCIDR("1.2.3.4/16")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	_, authKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, cryptKey, err := decodeIPSecKey("0123456789abcdef0123456789abcdef")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	key := &ipSecKey{
 		Spi:   1,
 		ReqID: 1,
@@ -255,40 +260,40 @@ func (p *IPSecSuitePrivileged) TestUpdateExistingIPSecEndpoint(c *C) {
 	ipSecKeysGlobal["1.2.3.4"] = key
 	ipSecKeysGlobal[""] = key
 
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, false, DefaultReqID)
+	require.NoError(t, err)
 
 	// test updateExisting (xfrm delete + add)
-	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, true)
-	c.Assert(err, IsNil)
+	_, err = UpsertIPsecEndpoint(local, remote, local.IP, remote.IP, 0, "remote-boot-id", IPSecDirBoth, false, true, DefaultReqID)
+	require.NoError(t, err)
 
-	cleanIPSecStatesAndPolicies(c)
+	cleanIPSecStatesAndPolicies(t)
 	ipSecKeysGlobal["1.1.3.4"] = nil
 	ipSecKeysGlobal["1.2.3.4"] = nil
 	ipSecKeysGlobal[""] = nil
 }
 
-func cleanIPSecStatesAndPolicies(c *C) {
+func cleanIPSecStatesAndPolicies(t *testing.T) {
 	xfrmStateList, err := netlink.XfrmStateList(netlink.FAMILY_ALL)
 	if err != nil {
-		c.Fatalf("Can't list XFRM states: %v", err)
+		t.Fatalf("Can't list XFRM states: %v", err)
 	}
 
 	for _, s := range xfrmStateList {
 		if err := netlink.XfrmStateDel(&s); err != nil {
-			c.Fatalf("Can't delete XFRM state: %v", err)
+			t.Fatalf("Can't delete XFRM state: %v", err)
 		}
 
 	}
 
 	xfrmPolicyList, err := netlink.XfrmPolicyList(netlink.FAMILY_ALL)
 	if err != nil {
-		c.Fatalf("Can't list XFRM policies: %v", err)
+		t.Fatalf("Can't list XFRM policies: %v", err)
 	}
 
 	for _, p := range xfrmPolicyList {
 		if err := netlink.XfrmPolicyDel(&p); err != nil {
-			c.Fatalf("Can't delete XFRM policy: %v", err)
+			t.Fatalf("Can't delete XFRM policy: %v", err)
 		}
 	}
 }

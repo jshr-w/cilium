@@ -7,13 +7,16 @@ import (
 	"github.com/cilium/hive/cell"
 
 	"github.com/cilium/cilium/pkg/maps/authmap"
+	"github.com/cilium/cilium/pkg/maps/bwmap"
 	"github.com/cilium/cilium/pkg/maps/configmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap/gc"
 	"github.com/cilium/cilium/pkg/maps/egressmap"
 	"github.com/cilium/cilium/pkg/maps/l2respondermap"
 	"github.com/cilium/cilium/pkg/maps/multicast"
+	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/maps/signalmap"
+	"github.com/cilium/cilium/pkg/maps/srv6map"
 )
 
 // Cell contains all cells which are providing BPF Maps.
@@ -45,4 +48,14 @@ var Cell = cell.Module(
 
 	// Provides access to the multicast maps.
 	multicast.Cell,
+
+	// Provies access to the SRv6 maps.
+	srv6map.Cell,
+
+	// Bandwidth (cilium_throttle) map contains the per-endpoint bandwidth limits.
+	// Provides RWTable[bwmap.Edt] for configuring the limits.
+	bwmap.Cell,
+
+	// Provides access to NAT maps.
+	nat.Cell,
 )

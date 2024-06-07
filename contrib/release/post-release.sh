@@ -6,6 +6,8 @@ DIR=$(dirname $(readlink -ne $BASH_SOURCE))
 source "${DIR}/lib/common.sh"
 source "${DIR}/../backporting/common.sh"
 
+RELEASES_URL="https://github.com/cilium/cilium/releases"
+
 usage() {
     logecho "usage: $0 <RUN-URL> [VERSION] [GH-USERNAME]"
     logecho "RUN-URL      GitHub URL with the RUN for the release images"
@@ -28,8 +30,8 @@ handle_args() {
         common::exit 0
     fi
 
-    if ! hub help | grep -q "pull-request"; then
-        echo "This tool relies on 'hub' from https://github.com/github/hub." 1>&2
+    if ! gh help > /dev/null; then
+        echo "This tool relies on 'gh' from https://cli.github.com/." 1>&2
         echo "Please install this tool first." 1>&2
         common::exit 1
     fi
@@ -49,9 +51,8 @@ handle_args() {
         common::exit 1 "Invalid VERSION ARG \"$2\"; $RELEASE_FORMAT_MSG"
     fi
 
-    if [ -z "${GITHUB_TOKEN}" ]; then
-        usage 2>&1
-        common::exit 1 "GITHUB_TOKEN not set!"
+    if ! gh auth status >/dev/null; then
+        common::exit 1 "Failed to authenticate with GitHub"
     fi
 }
 
@@ -66,13 +67,16 @@ main() {
     git checkout -b pr/$version-digests $version
     ${DIR}/pull-docker-manifests.sh "$@"
 
-    echo -e "$ersion\n" > $version-release-summary.txt
     # Grab the release notes for the current release, stop before the next
     # release. The start of line `## vX.Y.Z` lines will match in command.
-    tail -n+4 CHANGELOG.md | sed '/^## v.*$/q' >> $version-release-summary.txt
+    tail -n+4 CHANGELOG.md | sed '/^## v.*$/q' > $version-release-summary.txt
     tail -n+2 digest-$version.txt >> $version-release-summary.txt
     logecho "Creating Github draft release"
-    logrun hub release create -d -F $version-release-summary.txt $version
+    prerelease=""
+    if echo $ersion | grep -q 'pre\|rc'; then
+        prerelease="-p"
+    fi
+    logrun gh release create -d $prerelease -F $version-release-summary.txt $version --title "$ersion"
     logecho "Browse to $RELEASES_URL to see the draft release"
 
     if version_is_prerelease "$version" && ! version_is_rc "$version"; then
@@ -95,7 +99,7 @@ main() {
     logecho "Sending pull request for branch v$branch..."
     PR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     git push $user_remote "$PR_BRANCH"
-    hub pull-request -b "v$branch" -l backport/$branch
+    gh pr create -B "v$branch" -l backport/$branch
 }
 
 main "$@"

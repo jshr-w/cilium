@@ -170,18 +170,22 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	}
 
 	ether, ip, l4, srcIP, dstIP, srcPort, dstPort, summary := decodeLayers(p.packet)
-	if tn != nil {
+	if tn != nil && ip != nil {
 		if !tn.OriginalIP().IsUnspecified() {
 			// Ignore invalid IP - getters will handle invalid value.
 			srcIP, _ = ippkg.AddrFromIP(tn.OriginalIP())
-			if ip != nil {
+			// On SNAT the trace notification has OrigIP set to the pre
+			// translation IP and the source IP parsed from the header is the
+			// post translation IP. The check is here because sometimes we get
+			// trace notifications with OrigIP set to the header's IP
+			// (pre-translation events?)
+			if ip.GetSource() != srcIP.String() {
+				ip.SourceXlated = ip.GetSource()
 				ip.Source = srcIP.String()
 			}
 		}
 
-		if ip != nil {
-			ip.Encrypted = (tn.Reason & monitor.TraceReasonEncryptMask) != 0
-		}
+		ip.Encrypted = tn.IsEncrypted()
 	}
 
 	srcLabelID, dstLabelID := decodeSecurityIdentities(dn, tn, pvn)
@@ -217,6 +221,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.Reply = decoded.GetIsReply().GetValue() // false if GetIsReply() is nil
 	decoded.TrafficDirection = decodeTrafficDirection(srcEndpoint.ID, dn, tn, pvn)
 	decoded.EventType = decodeCiliumEventType(eventType, eventSubType)
+	decoded.TraceReason = decodeTraceReason(tn)
 	decoded.SourceService = sourceService
 	decoded.DestinationService = destinationService
 	decoded.PolicyMatchType = decodePolicyMatchType(pvn)
@@ -402,19 +407,15 @@ func decodeICMPv6(icmp *layers.ICMPv6) *pb.Layer4 {
 	}
 }
 
-func isReply(reason uint8) bool {
-	return reason & ^monitor.TraceReasonEncryptMask == monitor.TraceReasonCtReply
-}
-
 func decodeIsReply(tn *monitor.TraceNotify, pvn *monitor.PolicyVerdictNotify) *wrapperspb.BoolValue {
 	switch {
-	case tn != nil && monitor.TraceReasonIsKnown(tn.Reason):
-		if monitor.TraceReasonIsEncap(tn.Reason) || monitor.TraceReasonIsDecap(tn.Reason) {
+	case tn != nil && tn.TraceReasonIsKnown():
+		if tn.TraceReasonIsEncap() || tn.TraceReasonIsDecap() {
 			return nil
 		}
 		// Reason was specified by the datapath, just reuse it.
 		return &wrapperspb.BoolValue{
-			Value: isReply(tn.Reason),
+			Value: tn.TraceReasonIsReply(),
 		}
 	case pvn != nil && pvn.Verdict >= 0:
 		// Forwarded PolicyVerdictEvents are emitted for the first packet of
@@ -432,6 +433,29 @@ func decodeCiliumEventType(eventType, eventSubType uint8) *pb.CiliumEventType {
 	return &pb.CiliumEventType{
 		Type:    int32(eventType),
 		SubType: int32(eventSubType),
+	}
+}
+
+func decodeTraceReason(tn *monitor.TraceNotify) pb.TraceReason {
+	if tn == nil {
+		return pb.TraceReason_TRACE_REASON_UNKNOWN
+	}
+	// The Hubble protobuf enum values aren't 1:1 mapped with Cilium's datapath
+	// because we want pb.TraceReason_TRACE_REASON_UNKNOWN = 0 while in
+	// datapath monitor.TraceReasonUnknown = 5. The mapping works as follow:
+	switch {
+	// monitor.TraceReasonUnknown is mapped to pb.TraceReason_TRACE_REASON_UNKNOWN
+	case tn.TraceReason() == monitor.TraceReasonUnknown:
+		return pb.TraceReason_TRACE_REASON_UNKNOWN
+	// values before monitor.TraceReasonUnknown are "offset by one", e.g.
+	// TraceReasonCtEstablished = 1 → TraceReason_ESTABLISHED = 2 to make room
+	// for the zero value.
+	case tn.TraceReason() < monitor.TraceReasonUnknown:
+		return pb.TraceReason(tn.TraceReason()) + 1
+	// all values greater than monitor.TraceReasonUnknown are mapped 1:1 with
+	// the datapath values.
+	default:
+		return pb.TraceReason(tn.TraceReason())
 	}
 }
 
@@ -473,16 +497,27 @@ func decodeTrafficDirection(srcEP uint32, dn *monitor.DropNotify, tn *monitor.Tr
 		// tracking result from the `Reason` field to invert the direction for
 		// reply packets. The datapath currently populates the `Reason` field
 		// with CT information for some observation points.
-		if monitor.TraceReasonIsKnown(tn.Reason) {
+		if tn.TraceReasonIsKnown() {
 			// true if the traffic source is the local endpoint, i.e. egress
 			isSourceEP := tn.Source == uint16(srcEP)
+			// when OrigIP is set, then the packet was SNATed
+			isSNATed := !tn.OriginalIP().IsUnspecified()
 			// true if the packet is a reply, i.e. reverse direction
-			isReply := tn.Reason & ^monitor.TraceReasonEncryptMask == monitor.TraceReasonCtReply
+			isReply := tn.TraceReasonIsReply()
 
+			switch {
+			// Although technically the corresponding packet is ingressing the
+			// stack (TraceReasonEncryptOverlay traces are TraceToStack), it is
+			// ultimately originating from the local node and destinated to a
+			// remote node, so egress make more sense to expose at a high
+			// level.
+			case tn.TraceReason() == monitor.TraceReasonEncryptOverlay:
+				return pb.TrafficDirection_EGRESS
 			// isSourceEP != isReply ==
 			//  (isSourceEP && !isReply) || (!isSourceEP && isReply)
-			// GH-31226: currently broken for monitor.TraceReasonEncryptOverlay showing INGRESS
-			if isSourceEP != isReply {
+			case isSourceEP != isReply:
+				return pb.TrafficDirection_EGRESS
+			case isSNATed:
 				return pb.TrafficDirection_EGRESS
 			}
 			return pb.TrafficDirection_INGRESS

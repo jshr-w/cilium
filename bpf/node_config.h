@@ -18,9 +18,9 @@
 
 #define CLUSTER_ID 0
 
-#ifndef NODE_MAC
-DEFINE_MAC(NODE_MAC, 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xde);
-#define NODE_MAC fetch_mac(NODE_MAC)
+#ifndef THIS_INTERFACE_MAC
+DEFINE_MAC(THIS_INTERFACE_MAC, 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xde);
+#define THIS_INTERFACE_MAC fetch_mac(THIS_INTERFACE_MAC)
 #endif
 
 #ifndef ROUTER_IP
@@ -47,6 +47,7 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define TUNNEL_PROTOCOL TUNNEL_PROTOCOL_VXLAN
 #endif
 
+#define UNKNOWN_ID 0
 #define HOST_ID 1
 #define WORLD_ID 2
 #if defined ENABLE_IPV4 && defined ENABLE_IPV6
@@ -144,8 +145,6 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define SRV6_POLICY_MAP4 test_cilium_srv6_policy_v4
 #define SRV6_POLICY_MAP6 test_cilium_srv6_policy_v6
 #define SRV6_SID_MAP test_cilium_srv6_sid
-#define SRV6_STATE_MAP4 test_cilium_srv6_state4
-#define SRV6_STATE_MAP6 test_cilium_srv6_state6
 #define ENDPOINTS_MAP test_cilium_lxc
 #define EVENTS_MAP test_cilium_events
 #define SIGNAL_MAP test_cilium_signals
@@ -201,7 +200,6 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define SRV6_VRF_MAP_SIZE 16384
 #define SRV6_POLICY_MAP_SIZE 16384
 #define SRV6_SID_MAP_SIZE 16384
-#define SRV6_STATE_MAP_SIZE 16384
 #define L2_RESPONSER_MAP4_SIZE 4096
 #define POLICY_PROG_MAP_SIZE ENDPOINTS_MAP_SIZE
 #define IPV4_FRAG_DATAGRAMS_MAP test_cilium_ipv4_frag_datagrams

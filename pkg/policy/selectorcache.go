@@ -12,7 +12,6 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/identity/cache"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
@@ -67,7 +66,7 @@ func getLocalScopeNets(id identity.NumericIdentity, lbls labels.LabelArray) []*n
 	return nil
 }
 
-func getIdentityCache(ids cache.IdentityCache) scIdentityCache {
+func getIdentityCache(ids identity.IdentityMap) scIdentityCache {
 	idCache := make(map[identity.NumericIdentity]scIdentity, len(ids))
 	for nid, lbls := range ids {
 		idCache[nid] = newIdentity(nid, lbls)
@@ -91,10 +90,6 @@ type userNotification struct {
 // subsets of identities each selector selects.
 type SelectorCache struct {
 	mutex lock.RWMutex
-
-	// idAllocator is used to allocate and release identities. It is used
-	// by the NameManager to manage identities corresponding to FQDNs.
-	idAllocator cache.IdentityAllocator
 
 	// idCache contains all known identities as informed by the
 	// kv-store and the local identity facility via our
@@ -192,11 +187,10 @@ func (sc *SelectorCache) queueUserNotification(user CachedSelectionUser, selecto
 }
 
 // NewSelectorCache creates a new SelectorCache with the given identities.
-func NewSelectorCache(allocator cache.IdentityAllocator, ids cache.IdentityCache) *SelectorCache {
+func NewSelectorCache(ids identity.IdentityMap) *SelectorCache {
 	sc := &SelectorCache{
-		idAllocator: allocator,
-		idCache:     getIdentityCache(ids),
-		selectors:   make(map[string]*identitySelector),
+		idCache:   getIdentityCache(ids),
+		selectors: make(map[string]*identitySelector),
 	}
 	sc.userCond = sync.NewCond(&sc.userMutex)
 	return sc
@@ -528,7 +522,7 @@ func (sc *SelectorCache) ChangeUser(selector CachedSelector, from, to CachedSele
 // Caller should Wait() on the returned sync.WaitGroup before triggering any
 // policy updates. Policy updates may need Endpoint locks, so this Wait() can
 // deadlock if the caller is holding any endpoint locks.
-func (sc *SelectorCache) UpdateIdentities(added, deleted cache.IdentityCache, wg *sync.WaitGroup) {
+func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, wg *sync.WaitGroup) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
 

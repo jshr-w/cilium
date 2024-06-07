@@ -11,6 +11,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bgpv1/manager/instance"
 	"github.com/cilium/cilium/pkg/bgpv1/types"
+	"github.com/cilium/cilium/pkg/k8s/resource"
 )
 
 // PathMap is a map of paths indexed by the NLRI string
@@ -18,6 +19,9 @@ type PathMap map[string]*types.Path
 
 // AFPathsMap is a map of paths per address family, indexed by the family
 type AFPathsMap map[types.Family]PathMap
+
+// ResourceAFPathsMap holds the AF paths keyed by the resource name.
+type ResourceAFPathsMap map[resource.Key]AFPathsMap
 
 type ReconcileAFPathsParams struct {
 	Logger       logrus.FieldLogger
@@ -175,4 +179,13 @@ func reconcilePaths(params *reconcilePathsParams) (PathMap, error) {
 	}
 
 	return runningAdverts, nil
+}
+
+func addPathToAFPathsMap(m AFPathsMap, fam types.Family, path *types.Path) {
+	pathsPerFamily, exists := m[fam]
+	if !exists {
+		pathsPerFamily = make(PathMap)
+		m[fam] = pathsPerFamily
+	}
+	pathsPerFamily[path.NLRI.String()] = path
 }

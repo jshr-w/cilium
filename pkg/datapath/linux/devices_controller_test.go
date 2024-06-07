@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/statedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
@@ -28,7 +30,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/statedb"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/netns"
 )
@@ -83,9 +84,6 @@ func TestDevicesController(t *testing.T) {
 		for _, r := range routes {
 			// undefined IP will stringify as "invalid IP", turn them into "".
 			actualDst, actualSrc, actualGw := r.Dst.String(), addrToString(r.Src), addrToString(r.Gw)
-			/*fmt.Printf("%d %s %s %s -- %d %s %s %s\n",
-			r.LinkIndex, actualDst, actualSrc, actualGw,
-			linkIndex, dst, src, gw)*/
 			if r.LinkIndex == linkIndex && actualDst == dst && actualSrc == src &&
 				actualGw == gw {
 				return true
@@ -388,6 +386,10 @@ func TestDevicesController_Wildcards(t *testing.T) {
 		require.NoError(t, createDummy("dummy0", "192.168.0.1/24", false))
 		require.NoError(t, createDummy("nonviable", "192.168.1.1/24", false))
 
+		// This device satisfies the autodetection rule, but should not be included
+		// because the ForceDeviceDetection option is not enabled
+		require.NoError(t, createDummy("eth0", "1.2.3.4/24", false))
+
 		for {
 			rxn := db.ReadTxn()
 			devs, invalidated := tables.SelectedDevices(devicesTable, rxn)
@@ -410,6 +412,76 @@ func TestDevicesController_Wildcards(t *testing.T) {
 	})
 }
 
+// TestDevicesController_with_ForcedDetection tests the behavior of device detection when forced detection is enabled.
+// It expects all devices matching a specific pattern to be detected will append to detected devices and marked as selected.
+func TestDevicesController_with_ForcedDetection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	testutils.PrivilegedTest(t)
+	devicesControllerTestSetup(t)
+
+	tlog := hivetest.Logger(t)
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
+		var (
+			db           *statedb.DB
+			devicesTable statedb.Table[*tables.Device]
+			h            *hive.Hive
+		)
+
+		// Function to set up the hive and run device detection
+		runDeviceDetection := func(devicePattern string, forceDetection bool) error {
+			h = hive.New(
+				DevicesControllerCell,
+				cell.Provide(func() (*netlinkFuncs, error) { return makeNetlinkFuncs() }),
+				cell.Invoke(func(db_ *statedb.DB, devicesTable_ statedb.Table[*tables.Device]) {
+					db = db_
+					devicesTable = devicesTable_
+				}),
+			)
+			hive.AddConfigOverride(h, func(c *DevicesConfig) {
+				c.Devices = []string{devicePattern}
+				c.ForceDeviceDetection = forceDetection
+			})
+
+			return h.Start(tlog, ctx)
+		}
+
+		// Function to check the expected number of devices
+		testDevices := func(expectedCount int) bool {
+			rxn := db.ReadTxn()
+			devs, invalidated := tables.SelectedDevices(devicesTable, rxn)
+			if len(devs) == expectedCount {
+				return true
+			}
+
+			select {
+			case <-ctx.Done():
+				t.Fatalf("Test timed out while waiting for devices, last seen: %v", devs)
+				return false
+			case <-invalidated:
+				return false
+			}
+		}
+
+		// Create dummy interfaces as per test requirements
+		require.NoError(t, createDummy("dummy0", "192.168.0.1/24", false))
+		require.NoError(t, createDummy("dummy1", "192.168.1.1/24", false))
+
+		// This device does not match the "dummy+" pattern, but should be included
+		// because the ForceDeviceDetection option is enabled
+		require.NoError(t, createDummy("eth0", "1.2.3.4/24", false))
+
+		// Test with forced detection enabled
+		require.NoError(t, runDeviceDetection("dummy+", true))
+		require.True(t, testDevices(3), "Expecting all three devices to be detected")
+		require.NoError(t, h.Stop(tlog, ctx))
+
+		return nil
+	})
+}
+
 func TestDevicesController_Restarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -418,8 +490,6 @@ func TestDevicesController_Restarts(t *testing.T) {
 		db           *statedb.DB
 		devicesTable statedb.Table[*tables.Device]
 	)
-
-	logging.SetLogLevelToDebug()
 
 	// Is this the first subscription?
 	var first atomic.Bool
@@ -520,7 +590,7 @@ func TestDevicesController_Restarts(t *testing.T) {
 		},
 	}
 
-	tlog := hivetest.Logger(t)
+	tlog := hivetest.Logger(t, hivetest.LogLevel(slog.LevelDebug))
 	h := hive.New(
 		DevicesControllerCell,
 		cell.Provide(func() *netlinkFuncs { return &funcs }),

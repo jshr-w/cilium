@@ -19,6 +19,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/api/v1/models"
@@ -47,7 +48,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
-	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/monitor/notifications"
@@ -290,6 +290,10 @@ type Endpoint struct {
 	// K8sNamespace is the Kubernetes namespace of the endpoint.
 	// Immutable after Endpoint creation.
 	K8sNamespace string
+
+	// K8sUID is the Kubernetes UID of the pod. Passed directly from the CNI.
+	// Immutable after Endpoint creation.
+	K8sUID string
 
 	// pod
 	pod atomic.Pointer[slim_corev1.Pod]
@@ -1070,7 +1074,7 @@ func (e *Endpoint) Update(cfg *models.EndpointConfigurationSpec) error {
 
 	// Only regenerate if necessary.
 	if cfg.Options == nil || e.updateAndOverrideEndpointOptions(om) || e.status.CurrentStatus() != OK {
-		regenCtx.RegenerationLevel = regeneration.RegenerateWithDatapathRewrite
+		regenCtx.RegenerationLevel = regeneration.RegenerateWithDatapath
 
 		e.getLogger().Debug("need to regenerate endpoint; checking state before" +
 			" attempting to regenerate")
@@ -1193,10 +1197,6 @@ type DeleteConfig struct {
 func (e *Endpoint) leaveLocked(proxyWaitGroup *completion.WaitGroup, conf DeleteConfig) []error {
 	errs := []error{}
 
-	if !e.isProperty(PropertyFakeEndpoint) {
-		e.owner.Datapath().Loader().Unload(e.createEpInfoCache(""))
-	}
-
 	// Remove policy references from shared policy structures
 	e.desiredPolicy.Detach()
 	e.realizedPolicy.Detach()
@@ -1266,6 +1266,14 @@ func (e *Endpoint) GetK8sNamespace() string {
 	// const after creation
 	ns := e.K8sNamespace
 	return ns
+}
+
+// GetK8sUID returns the UID of the pod if the endpoint represents a Kubernetes
+// pod.
+func (e *Endpoint) GetK8sUID() string {
+	// const after creation
+	uid := e.K8sUID
+	return uid
 }
 
 // SetPod sets the pod related to this endpoint.
@@ -1725,9 +1733,15 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 
 	ns, podName := e.GetK8sNamespace(), e.GetK8sPodName()
 
-	pod, cp, identityLabels, info, _, err := resolveMetadata(ns, podName)
-	if err != nil {
+	pod, k8sMetadata, err := resolveMetadata(ns, podName)
+	switch {
+	case err != nil:
 		e.Logger(resolveLabels).WithError(err).Warning("Unable to fetch kubernetes labels")
+		fallthrough
+	case e.K8sUID != "" && e.K8sUID != string(pod.GetUID()):
+		if err == nil {
+			err = errors.New("metadata resolver: pod store out-of-date")
+		}
 		// If we were unable to fetch the k8s endpoints then
 		// we will mark the endpoint with the init identity.
 		if !restoredEndpoint {
@@ -1746,12 +1760,12 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 
 	// Merge the labels retrieved from the 'resolveMetadata' into the base
 	// labels.
-	controllerBaseLabels.MergeLabels(identityLabels)
+	controllerBaseLabels.MergeLabels(k8sMetadata.IdentityLabels)
 
 	e.SetPod(pod)
-	e.SetK8sMetadata(cp)
+	e.SetK8sMetadata(k8sMetadata.ContainerPorts)
 	e.UpdateNoTrackRules(func(_, _ string) (noTrackPort string, err error) {
-		po, _, _, _, _, err := resolveMetadata(ns, podName)
+		po, _, err := resolveMetadata(ns, podName)
 		if err != nil {
 			return "", err
 		}
@@ -1759,7 +1773,7 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 		return value, nil
 	})
 	e.UpdateVisibilityPolicy(func(_, _ string) (proxyVisibility string, err error) {
-		po, _, _, _, _, err := resolveMetadata(ns, podName)
+		po, _, err := resolveMetadata(ns, podName)
 		if err != nil {
 			return "", err
 		}
@@ -1767,11 +1781,11 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 		return value, nil
 	})
 	e.UpdateBandwidthPolicy(bwm, func(ns, podName string) (bandwidthEgress string, err error) {
-		_, _, _, _, annotations, err := resolveMetadata(ns, podName)
+		_, k8sMetadata, err := resolveMetadata(ns, podName)
 		if err != nil {
 			return "", err
 		}
-		return annotations[bandwidth.EgressBandwidth], nil
+		return k8sMetadata.Annotations[bandwidth.EgressBandwidth], nil
 	})
 
 	// If 'baseLabels' are not set then 'controllerBaseLabels' only contains
@@ -1782,14 +1796,23 @@ func (e *Endpoint) metadataResolver(ctx context.Context,
 	if len(baseLabels) != 0 {
 		source = labels.LabelSourceAny
 	}
-	regenTriggered = e.UpdateLabels(ctx, source, controllerBaseLabels, info, blocking)
+	regenTriggered = e.UpdateLabels(ctx, source, controllerBaseLabels, k8sMetadata.InfoLabels, blocking)
 
 	return regenTriggered, nil
 }
 
+// K8sMetadata is a collection of Kubernetes-related metadata that are fetched
+// from Kubernetes.
+type K8sMetadata struct {
+	ContainerPorts []slim_corev1.ContainerPort
+	IdentityLabels labels.Labels
+	InfoLabels     labels.Labels
+	Annotations    map[string]string
+}
+
 // MetadataResolverCB provides an implementation for resolving the endpoint
 // metadata for an endpoint such as the associated labels and annotations.
-type MetadataResolverCB func(ns, podName string) (pod *slim_corev1.Pod, _ []slim_corev1.ContainerPort, identityLabels labels.Labels, infoLabels labels.Labels, annotations map[string]string, err error)
+type MetadataResolverCB func(ns, podName string) (pod *slim_corev1.Pod, k8sMetadata *K8sMetadata, err error)
 
 // RunMetadataResolver starts a controller associated with the received
 // endpoint which will periodically attempt to resolve the metadata for the
@@ -1893,7 +1916,6 @@ func (e *Endpoint) ModifyIdentityLabels(source string, addLabels, delLabels labe
 		return err
 	}
 
-	var rev int
 	// If the client made a request to modify labels, even if there was
 	// no new labels added or deleted then we can safely remove the init
 	// label. This is a workaround to allow the cilium-docker plugin
@@ -1902,7 +1924,7 @@ func (e *Endpoint) ModifyIdentityLabels(source string, addLabels, delLabels labe
 	if len(addLabels) == 0 && len(delLabels) == 0 && e.IsInit() {
 		idLabls := e.OpLabels.IdentityLabels()
 		delete(idLabls, labels.IDNameInit)
-		rev = e.replaceIdentityLabels(source, idLabls)
+		e.replaceIdentityLabels(source, idLabls)
 		changed = true
 	}
 	if changed {
@@ -1912,12 +1934,11 @@ func (e *Endpoint) ModifyIdentityLabels(source string, addLabels, delLabels labe
 		e.setState(StateWaitingForIdentity, "Triggering identity resolution due to updated identity labels")
 
 		e.identityRevision++
-		rev = e.identityRevision
 	}
 	e.unlock()
 
 	if changed {
-		e.runIdentityResolver(context.Background(), rev, false)
+		e.runIdentityResolver(context.Background(), false)
 	}
 	return nil
 }
@@ -2033,7 +2054,7 @@ func (e *Endpoint) UpdateLabels(ctx context.Context, sourceFilter string, identi
 
 	e.unlock()
 	if rev != 0 {
-		return e.runIdentityResolver(ctx, rev, blocking)
+		return e.runIdentityResolver(ctx, blocking)
 	}
 
 	return false
@@ -2070,7 +2091,7 @@ func (e *Endpoint) identityResolutionIsObsolete(myChangeRev int) bool {
 // are currently configured on the endpoint.
 //
 // Must be called with e.mutex NOT held.
-func (e *Endpoint) runIdentityResolver(ctx context.Context, myChangeRev int, blocking bool) (regenTriggered bool) {
+func (e *Endpoint) runIdentityResolver(ctx context.Context, blocking bool) (regenTriggered bool) {
 	err := e.rlockAlive()
 	if err != nil {
 		// If a labels update and an endpoint delete API request arrive
@@ -2089,7 +2110,7 @@ func (e *Endpoint) runIdentityResolver(ctx context.Context, myChangeRev int, blo
 	regenTriggered = false
 	if blocking || identity.IdentityAllocationIsLocal(newLabels) {
 		scopedLog.Info("Resolving identity labels (blocking)")
-		regenTriggered, err = e.identityLabelsChanged(ctx, myChangeRev)
+		regenTriggered, err = e.identityLabelsChanged(ctx)
 		if err != nil {
 			if errors.Is(err, ErrNotAlive) {
 				scopedLog.Debug("not changing endpoint identity because endpoint is in process of being removed")
@@ -2106,7 +2127,7 @@ func (e *Endpoint) runIdentityResolver(ctx context.Context, myChangeRev int, blo
 		controller.ControllerParams{
 			Group: resolveIdentityControllerGroup,
 			DoFunc: func(ctx context.Context) error {
-				_, err := e.identityLabelsChanged(ctx, myChangeRev)
+				_, err := e.identityLabelsChanged(ctx)
 				if errors.Is(err, ErrNotAlive) {
 					e.getLogger().Debug("not changing endpoint identity because endpoint is in process of being removed")
 					return controller.NewExitReason("Endpoint disappeared")
@@ -2121,12 +2142,13 @@ func (e *Endpoint) runIdentityResolver(ctx context.Context, myChangeRev int, blo
 	return regenTriggered
 }
 
-func (e *Endpoint) identityLabelsChanged(ctx context.Context, myChangeRev int) (regenTriggered bool, err error) {
+func (e *Endpoint) identityLabelsChanged(ctx context.Context) (regenTriggered bool, err error) {
 	// e.setState() called below, can't take a read lock.
 	if err := e.lockAlive(); err != nil {
-		return false, ErrNotAlive
+		return false, err
 	}
 	newLabels := e.OpLabels.IdentityLabels()
+	myChangeRev := e.identityRevision
 	elog := e.getLogger().WithFields(logrus.Fields{
 		logfields.EndpointID:     e.ID,
 		logfields.IdentityLabels: newLabels,
@@ -2251,7 +2273,7 @@ func (e *Endpoint) identityLabelsChanged(ctx context.Context, myChangeRev int) (
 	readyToRegenerate := false
 	regenMetadata := &regeneration.ExternalRegenerationMetadata{
 		Reason:            "updated security labels",
-		RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
 	}
 
 	// Regeneration is only triggered once the endpoint ID has been
@@ -2450,17 +2472,6 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
 	}
 	e.setState(StateDisconnecting, "Deleting endpoint")
 
-	// If dry mode is enabled, no changes to BPF maps are performed
-	if !e.isProperty(PropertyFakeEndpoint) {
-		if errs2 := lxcmap.DeleteElement(e); errs2 != nil {
-			errs = append(errs, errs2...)
-		}
-
-		if errs2 := e.deleteMaps(); errs2 != nil {
-			errs = append(errs, errs2...)
-		}
-	}
-
 	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
 		e.getLogger().WithFields(logrus.Fields{
 			"ep":     e.GetID(),
@@ -2490,6 +2501,24 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
 		}
 	}
 
+	// If dry mode is enabled, no changes to system state are made.
+	if !e.isProperty(PropertyFakeEndpoint) {
+		// Set the Endpoint's interface down to prevent it from passing any traffic
+		// after its tc filters are removed.
+		if err := e.setDown(); err != nil {
+			errs = append(errs, err)
+		}
+
+		// Detach the endpoint program from any tc(x) hooks.
+		e.owner.Datapath().Loader().Unload(e.createEpInfoCache(""))
+
+		// Delete the endpoint's entries from the global cilium_(egress)call_policy
+		// maps and remove per-endpoint cilium_calls_ and cilium_policy_ map pins.
+		if err := e.deleteMaps(); err != nil {
+			errs = append(errs, err...)
+		}
+	}
+
 	completionCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	proxyWaitGroup := completion.NewWaitGroup(completionCtx)
 
@@ -2503,6 +2532,21 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
 	cancel()
 
 	return errs
+}
+
+// setDown sets the Endpoint's underlying interface down. If the interface
+// cannot be retrieved, returns nil.
+func (e *Endpoint) setDown() error {
+	link, err := netlink.LinkByName(e.HostInterface())
+	if errors.As(err, &netlink.LinkNotFoundError{}) {
+		// No interface, nothing to do.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("setting interface %s down: %w", e.HostInterface(), err)
+	}
+
+	return netlink.LinkSetDown(link)
 }
 
 // WaitForFirstRegeneration waits for the endpoint to complete its first full regeneration.

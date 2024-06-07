@@ -43,6 +43,7 @@ var (
 type svcManager interface {
 	DeleteService(frontend lb.L3n4Addr) (bool, error)
 	UpsertService(*lb.SVC) (bool, lb.ID, error)
+	TerminateUDPConnectionsToBackend(l3n4Addr *lb.L3n4Addr)
 }
 
 type svcCache interface {
@@ -97,9 +98,10 @@ type Manager struct {
 	noNetnsCookieSupport bool
 }
 
-func NewRedirectPolicyManager(svc svcManager, lpr agentK8s.LocalPodResource, epM endpointManager) *Manager {
+func NewRedirectPolicyManager(svc svcManager, svcCache *k8s.ServiceCache, lpr agentK8s.LocalPodResource, epM endpointManager) *Manager {
 	return &Manager{
 		svcManager:            svc,
+		svcCache:              svcCache,
 		epManager:             epM,
 		localPods:             lpr,
 		policyFrontendsByHash: make(map[string]policyID),
@@ -108,10 +110,6 @@ func NewRedirectPolicyManager(svc svcManager, lpr agentK8s.LocalPodResource, epM
 		policyConfigs:         make(map[policyID]*LRPConfig),
 		policyEndpoints:       make(map[podID]sets.Set[policyID]),
 	}
-}
-
-func (rpm *Manager) RegisterSvcCache(cache svcCache) {
-	rpm.svcCache = cache
 }
 
 // Event handlers
@@ -562,6 +560,8 @@ func (rpm *Manager) updateConfigSvcFrontend(config *LRPConfig, frontends ...*fro
 }
 
 func (rpm *Manager) deletePolicyBackends(config *LRPConfig, podID podID) {
+	l3nL4Addrs := sets.New[*lb.L3n4Addr]()
+
 	for _, fe := range config.frontendMappings {
 		newBes := make([]backend, 0, len(fe.podBackends))
 		for _, be := range fe.podBackends {
@@ -569,6 +569,7 @@ func (rpm *Manager) deletePolicyBackends(config *LRPConfig, podID podID) {
 			// order same.
 			if be.podID != podID {
 				newBes = append(newBes, be)
+				continue
 			}
 			if config.skipRedirectFromBackend {
 				if be.AddrCluster.Is4() {
@@ -577,9 +578,13 @@ func (rpm *Manager) deletePolicyBackends(config *LRPConfig, podID podID) {
 					rpm.skipLBMap.DeleteLB6ByNetnsCookie(be.podNetnsCookie)
 				}
 			}
+			l3nL4Addrs.Insert(&be.L3n4Addr)
 		}
 		fe.podBackends = newBes
 		rpm.notifyPolicyBackendDelete(config, fe)
+	}
+	for _, addr := range l3nL4Addrs.UnsortedList() {
+		rpm.svcManager.TerminateUDPConnectionsToBackend(addr)
 	}
 }
 

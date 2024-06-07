@@ -12,6 +12,8 @@ on:
 # By specifying the access of one of the scopes, all of those that are not
 # specified are set to 'none'.
 permissions:
+  # To read actions state with catchpoint/workflow-telemetry-action
+  actions: read
   # To be able to access the repository with actions/checkout
   contents: read
   # To be able to request the JWT from GitHub's OIDC provider
@@ -43,6 +45,8 @@ env:
   USE_GKE_GCLOUD_AUTH_PLUGIN: True
   gcp_zone: us-east5-a
   k8s_version: 1.28
+  # renovate: datasource=docker depName=google/cloud-sdk
+  gcloud_version: 478.0.0
 
 jobs:
   installation-and-perf:
@@ -80,27 +84,51 @@ jobs:
             hubble: "false"
 
           - index: 5
+            name: "native-wireguard"
+            mode: "gke"
+            encryption: "wireguard"
+            hubble: "false"
+
+          - index: 6
+            name: "tunnel-wireguard"
+            mode: "tunnel"
+            encryption: "wireguard"
+            hubble: "false"
+
+          - index: 7
             name: "native-hubble"
             mode: "gke"
             encryption: "none"
             hubble: "true"
 
-          - index: 6
+          - index: 8
             name: "tunnel-hubble"
             mode: "tunnel"
             encryption: "none"
             hubble: "true"
 
-          - index: 7
+          - index: 9
             name: "native-ipsec-hubble"
             mode: "gke"
             encryption: "ipsec"
             hubble: "true"
 
-          - index: 8
+          - index: 10
             name: "tunnel-ipsec-hubble"
             mode: "tunnel"
             encryption: "ipsec"
+            hubble: "true"
+
+          - index: 11
+            name: "native-wireguard-hubble"
+            mode: "gke"
+            encryption: "wireguard"
+            hubble: "true"
+
+          - index: 12
+            name: "tunnel-wireguard-hubble"
+            mode: "tunnel"
+            encryption: "wireguard"
             hubble: "true"
 
     steps:
@@ -110,7 +138,7 @@ jobs:
           comment_on_pr: false
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -127,7 +155,7 @@ jobs:
           else
             SHA="${{ github.sha }}"
             OWNER="${{ github.ref_name }}"
-            OWNER="${OWNER/./-}"
+            OWNER="${OWNER//[.\/]/-}"
           fi
 
           CILIUM_INSTALL_DEFAULTS="--chart-directory=install/kubernetes/cilium \
@@ -162,11 +190,15 @@ jobs:
             CILIUM_INSTALL_DEFAULTS+=" --helm-set=encryption.enabled=true --helm-set=encryption.type=ipsec"
           fi
 
+          if [ "${{ matrix.encryption }}" = "wireguard" ] ; then
+            CILIUM_INSTALL_DEFAULTS+=" --helm-set=encryption.enabled=true --helm-set=encryption.type=wireguard"
+          fi
+
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
           echo owner=${OWNER} >> $GITHUB_OUTPUT
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@a9579d1afc528b085930c5237a69ee77b2c2be76 # v0.16.4
+        uses: cilium/cilium-cli@d86ae1ca5755139d6ca9423b9606cb047fc8e00f # v0.16.9
         with:
           repository: ${{ env.CILIUM_CLI_RELEASE_REPO }}
           release-version: ${{ env.CILIUM_CLI_VERSION }}
@@ -174,7 +206,7 @@ jobs:
 
       - name: Set up gcloud credentials
         id: 'auth'
-        uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        uses: google-github-actions/auth@71fee32a0bb7e97b4d33d548e7d957010649d8fa # v2.1.3
         with:
           workload_identity_provider: ${{ secrets.GCP_PERF_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_PERF_SA }}
@@ -185,7 +217,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: ${{ secrets.GCP_PERF_PROJECT_ID }}
-          version: "405.0.0"
+          version: ${{ env.gcloud_version }}
 
       - name: Install gke-gcloud-auth-plugin
         run: |

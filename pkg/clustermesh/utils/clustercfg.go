@@ -6,6 +6,7 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path"
 	"time"
 
@@ -13,7 +14,13 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 )
 
-func SetClusterConfig(ctx context.Context, clusterName string, config *cmtypes.CiliumClusterConfig, backend kvstore.BackendOperations) error {
+var (
+	// ErrClusterConfigNotFound is the sentinel error returned by
+	// GetClusterConfig if the cluster configuration is not found.
+	ErrClusterConfigNotFound = errors.New("not found")
+)
+
+func SetClusterConfig(ctx context.Context, clusterName string, config cmtypes.CiliumClusterConfig, backend kvstore.BackendOperations) error {
 	key := path.Join(kvstore.ClusterConfigPrefix, clusterName)
 
 	val, err := json.Marshal(config)
@@ -32,7 +39,7 @@ func SetClusterConfig(ctx context.Context, clusterName string, config *cmtypes.C
 	return nil
 }
 
-func GetClusterConfig(ctx context.Context, clusterName string, backend kvstore.BackendOperations) (*cmtypes.CiliumClusterConfig, error) {
+func GetClusterConfig(ctx context.Context, clusterName string, backend kvstore.BackendOperations) (cmtypes.CiliumClusterConfig, error) {
 	var config cmtypes.CiliumClusterConfig
 
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -40,27 +47,16 @@ func GetClusterConfig(ctx context.Context, clusterName string, backend kvstore.B
 
 	val, err := backend.Get(ctx, path.Join(kvstore.ClusterConfigPrefix, clusterName))
 	if err != nil {
-		return nil, err
+		return cmtypes.CiliumClusterConfig{}, err
 	}
 
-	// Cluster configuration missing, but it's not an error
 	if val == nil {
-		return nil, nil
+		return cmtypes.CiliumClusterConfig{}, ErrClusterConfigNotFound
 	}
 
 	if err := json.Unmarshal(val, &config); err != nil {
-		return nil, err
+		return cmtypes.CiliumClusterConfig{}, err
 	}
 
-	return &config, nil
-}
-
-// IsClusterConfigRequired returns whether the remote kvstore guarantees that the
-// cilium cluster config will be eventually created.
-func IsClusterConfigRequired(ctx context.Context, backend kvstore.BackendOperations) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-
-	val, err := backend.Get(ctx, kvstore.HasClusterConfigPath)
-	return val != nil, err
+	return config, nil
 }

@@ -34,6 +34,7 @@ import (
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	policyTypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/revert"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/types"
@@ -92,7 +93,7 @@ func (e *Endpoint) getNamedPortEgress(npMap types.NamedPortMultiMap, name string
 // and the resolved destination port and protocol numbers, if any.
 // Must be called with e.mutex held.
 func (e *Endpoint) proxyID(l4 *policy.L4Filter, listener string) (string, uint16, uint8) {
-	port := uint16(l4.Port)
+	port := l4.Port
 	protocol := uint8(l4.U8Proto)
 	// Calculate protocol if it is 0 (default) and
 	// is not "ANY" (that is, it was not calculated).
@@ -194,7 +195,7 @@ type policyGenerateResult struct {
 //
 // Returns a result that should be passed to setDesiredPolicy after the endpoint's
 // write lock has been acquired, or err if recomputing policy failed.
-func (e *Endpoint) regeneratePolicy() (*policyGenerateResult, error) {
+func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics) (*policyGenerateResult, error) {
 	var err error
 
 	// lock the endpoint, read our values, then unlock
@@ -228,11 +229,6 @@ func (e *Endpoint) regeneratePolicy() (*policyGenerateResult, error) {
 	e.runlock()
 
 	e.getLogger().Debug("Starting policy recalculation...")
-	stats := &policyRegenerationStatistics{}
-	stats.totalTime.Start()
-	defer func() {
-		e.updatePolicyRegenerationStatistics(stats, forcePolicyCompute, err)
-	}()
 
 	stats.waitingForPolicyRepository.Start()
 	repo := e.policyGetter.GetPolicyRepository()
@@ -336,31 +332,6 @@ func (e *Endpoint) setDesiredPolicy(res *policyGenerateResult) error {
 	return nil
 }
 
-func (e *Endpoint) updatePolicyRegenerationStatistics(stats *policyRegenerationStatistics, forceRegeneration bool, err error) {
-	success := err == nil
-
-	stats.totalTime.End(success)
-	stats.success = success
-
-	stats.SendMetrics()
-
-	fields := logrus.Fields{
-		"waitingForIdentityCache":    &stats.waitingForIdentityCache,
-		"waitingForPolicyRepository": &stats.waitingForPolicyRepository,
-		"policyCalculation":          &stats.policyCalculation,
-		"forcedRegeneration":         forceRegeneration,
-	}
-
-	if err != nil {
-		e.getLogger().WithFields(fields).WithError(err).Warn("Regeneration of policy failed")
-		return
-	}
-
-	if logger := e.getLogger(); logging.CanLogAt(logger.Logger, logrus.DebugLevel) {
-		logger.WithFields(fields).Debug("Completed endpoint policy recalculation")
-	}
-}
-
 // updateAndOverrideEndpointOptions updates the boolean configuration options for the endpoint
 // based off of policy configuration, daemon policy enforcement mode, and any
 // configuration options provided in opts. Returns whether the options changed
@@ -380,7 +351,6 @@ func (e *Endpoint) updateAndOverrideEndpointOptions(opts option.OptionMap) (opts
 // Called with e.mutex UNlocked
 func (e *Endpoint) regenerate(ctx *regenerationContext) (retErr error) {
 	var revision uint64
-	var stateDirComplete bool
 	var err error
 
 	ctx.Stats = regenerationStatistics{}
@@ -485,7 +455,7 @@ func (e *Endpoint) regenerate(ctx *regenerationContext) (retErr error) {
 		e.unlock()
 	}()
 
-	revision, stateDirComplete, err = e.regenerateBPF(ctx)
+	revision, err = e.regenerateBPF(ctx)
 
 	// Write full verifier log to the endpoint directory.
 	var ve *ebpf.VerifierError
@@ -516,13 +486,13 @@ func (e *Endpoint) regenerate(ctx *regenerationContext) (retErr error) {
 		return err
 	}
 
-	return e.updateRealizedState(stats, origDir, revision, stateDirComplete)
+	return e.updateRealizedState(stats, origDir, revision)
 }
 
 // updateRealizedState sets any realized state fields within the endpoint to
 // be the desired state of the endpoint. This is only called after a successful
 // regeneration of the endpoint.
-func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir string, revision uint64, stateDirComplete bool) error {
+func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir string, revision uint64) error {
 	// Update desired policy for endpoint because policy has now been realized
 	// in the datapath. PolicyMap state is not updated here, because that is
 	// performed in endpoint.syncPolicyMap().
@@ -538,7 +508,7 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 	// Depending upon result of BPF regeneration (compilation executed),
 	// shift endpoint directories to match said BPF regeneration
 	// results.
-	err = e.synchronizeDirectories(origDir, stateDirComplete)
+	err = e.synchronizeDirectories(origDir)
 	if err != nil {
 		return fmt.Errorf("error synchronizing endpoint BPF program directories: %w", err)
 	}
@@ -775,7 +745,7 @@ func (e *Endpoint) startRegenerationFailureHandler() {
 				Reason:        reasonRegenRetry,
 				// Completely rewrite the endpoint - we don't know the nature
 				// of the failure, simply that something failed.
-				RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+				RegenerationLevel: regeneration.RegenerateWithDatapath,
 			}
 			regen, _ := e.SetRegenerateStateIfAlive(regenMetadata)
 			if !regen {
@@ -985,7 +955,7 @@ func (e *Endpoint) UpdateBandwidthPolicy(bwm dptypes.BandwidthManager, annoCB An
 // LabelArrayList is shallow-copied and therefore must not be mutated.
 // This function explicitly exported to be accessed by code outside of the
 // Cilium source code tree and for testing.
-func (e *Endpoint) GetRealizedPolicyRuleLabelsForKey(key policy.Key) (
+func (e *Endpoint) GetRealizedPolicyRuleLabelsForKey(key policyTypes.Key) (
 	derivedFrom labels.LabelArrayList,
 	revision uint64,
 	ok bool,

@@ -9,10 +9,11 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"testing"
 	"time"
 
-	. "github.com/cilium/checkmate"
 	ciliumdns "github.com/cilium/dns"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpoint"
@@ -24,6 +25,8 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
@@ -36,17 +39,32 @@ type DaemonFQDNSuite struct {
 	d *Daemon
 }
 
-var _ = Suite(&DaemonFQDNSuite{})
+var notifyOnDNSMsgBenchSetup sync.Once
 
-func (ds *DaemonFQDNSuite) SetUpSuite(c *C) {
-	testutils.IntegrationTest(c)
+func setupDaemonFQDNSuite(tb testing.TB) *DaemonFQDNSuite {
+	testutils.IntegrationTest(tb)
 
-	re.InitRegexCompileLRU(defaults.FQDNRegexCompileLRUSize)
-}
+	// We rely on a sync.Once to complete the benchmark setup that initialize
+	// read-only global status.
+	// Also, node.SetTestLocalNodeStore() panics if it called more than once.
+	notifyOnDNSMsgBenchSetup.Do(func() {
+		// set FQDN related options to defaults in order to avoid a flood of warnings
+		option.Config.DNSProxyLockCount = defaults.DNSProxyLockCount
+		option.Config.DNSProxyLockTimeout = defaults.DNSProxyLockTimeout
+		option.Config.FQDNProxyResponseMaxDelay = defaults.FQDNProxyResponseMaxDelay
 
-func (ds *DaemonFQDNSuite) SetUpTest(c *C) {
+		// Set local node store as it is accessed by NewLogRecord to get node IPv4
+		node.SetTestLocalNodeStore()
+
+		re.InitRegexCompileLRU(defaults.FQDNRegexCompileLRUSize)
+		logger.SetEndpointInfoRegistry(&dummyInfoRegistry{})
+	})
+
+	ds := &DaemonFQDNSuite{}
 	d := &Daemon{}
-	d.policy = policy.NewPolicyRepository(d.identityAllocator, nil, nil, nil)
+	d.ctx = context.Background()
+	d.policy = policy.NewPolicyRepository(nil, nil, nil)
+	d.endpointManager = endpointmanager.New(&dummyEpSyncher{}, nil, nil)
 	d.ipcache = ipcache.NewIPCache(&ipcache.Configuration{
 		Context:           context.TODO(),
 		IdentityAllocator: testidentity.NewMockIdentityAllocator(nil),
@@ -59,56 +77,29 @@ func (ds *DaemonFQDNSuite) SetUpTest(c *C) {
 		UpdateSelectors: d.updateSelectors,
 		IPCache:         d.ipcache,
 	})
-	d.endpointManager = endpointmanager.New(&dummyEpSyncher{}, nil, nil)
 	d.policy.GetSelectorCache().SetLocalIdentityNotifier(d.dnsNameManager)
 
 	ds.d = d
 
-	logger.SetEndpointInfoRegistry(&dummyInfoRegistry{})
+	return ds
 }
 
 type dummyInfoRegistry struct{}
 
-func (*dummyInfoRegistry) FillEndpointInfo(info *accesslog.EndpointInfo, addr netip.Addr, id identity.NumericIdentity) {
+func (*dummyInfoRegistry) FillEndpointInfo(ctx context.Context, info *accesslog.EndpointInfo, addr netip.Addr) {
 }
 
-// makeIPs generates count sequential IPv4 IPs
-func makeIPs(count uint32) []netip.Addr {
-	ips := make([]netip.Addr, 0, count)
-	for i := uint32(0); i < count; i++ {
-		ips = append(ips, netip.AddrFrom4([4]byte{byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i >> 0)}))
-	}
-	return ips
+type dummySelectorCacheUser struct{}
+
+func (d *dummySelectorCacheUser) IdentitySelectionUpdated(selector policy.CachedSelector, added, deleted []identity.NumericIdentity) {
 }
 
-// BenchmarkFqdnCache tests how slow a full dump of DNSHistory from a number of
-// endpoints is. Each endpoints has 1000 DNS lookups, each with 10 IPs. The
-// dump iterates over all endpoints, lookups, and IPs.
-func (ds *DaemonSuite) BenchmarkFqdnCache(c *C) {
-	c.StopTimer()
-
-	endpoints := make([]*endpoint.Endpoint, 0, c.N)
-	for i := 0; i < c.N; i++ {
-		lookupTime := time.Now()
-		ep := &endpoint.Endpoint{} // only works because we only touch .DNSHistory
-		ep.DNSHistory = fqdn.NewDNSCache(0)
-
-		for i := 0; i < 1000; i++ {
-			ep.DNSHistory.Update(lookupTime, fmt.Sprintf("domain-%d.com.", i), makeIPs(10), 1000)
-		}
-
-		endpoints = append(endpoints, ep)
-	}
-	c.StartTimer()
-
-	extractDNSLookups(endpoints, "0.0.0.0/0", "*", "")
-}
-
-// Benchmark_notifyOnDNSMsg stresses the main callback function for the DNS
+// BenchmarkNotifyOnDNSMsg stresses the main callback function for the DNS
 // proxy path, which is called on every DNS request and response.
-func (ds *DaemonFQDNSuite) Benchmark_notifyOnDNSMsg(c *C) {
+func BenchmarkNotifyOnDNSMsg(b *testing.B) {
+	ds := setupDaemonFQDNSuite(b)
+
 	var (
-		nameManager             = ds.d.dnsNameManager
 		ciliumIOSel             = api.FQDNSelector{MatchName: "cilium.io"}
 		ciliumIOSelMatchPattern = api.FQDNSelector{MatchPattern: "*cilium.io."}
 		ebpfIOSel               = api.FQDNSelector{MatchName: "ebpf.io"}
@@ -123,21 +114,22 @@ func (ds *DaemonFQDNSuite) Benchmark_notifyOnDNSMsg(c *C) {
 	)
 
 	// Register rules (simulates applied policies).
+	dscu := &dummySelectorCacheUser{}
 	selectorsToAdd := api.FQDNSelectorSlice{ciliumIOSel, ciliumIOSelMatchPattern, ebpfIOSel}
-	nameManager.Lock()
 	for _, sel := range selectorsToAdd {
-		nameManager.RegisterForIPUpdatesLocked(sel)
+		ds.d.policy.GetSelectorCache().AddFQDNSelector(dscu, nil, sel)
 	}
-	nameManager.Unlock()
+
+	const nEndpoints int = 1024
 
 	// Initialize the endpoints.
-	endpoints := make([]*endpoint.Endpoint, c.N)
+	endpoints := make([]*endpoint.Endpoint, nEndpoints)
 	for i := range endpoints {
 		endpoints[i] = &endpoint.Endpoint{
-			ID:   uint16(c.N % 65000),
-			IPv4: netip.MustParseAddr(fmt.Sprintf("10.96.%d.%d", (c.N>>16)%8, c.N%256)),
+			ID:   uint16(i),
+			IPv4: netip.MustParseAddr(fmt.Sprintf("10.96.%d.%d", i/256, i%256)),
 			SecurityIdentity: &identity.Identity{
-				ID: identity.NumericIdentity(c.N % int(identity.GetMaximumAllocationIdentity())),
+				ID: identity.NumericIdentity(i % int(identity.GetMaximumAllocationIdentity(option.Config.ClusterID))),
 			},
 			DNSZombies: &fqdn.DNSZombieMappings{
 				Mutex: lock.Mutex{},
@@ -148,43 +140,44 @@ func (ds *DaemonFQDNSuite) Benchmark_notifyOnDNSMsg(c *C) {
 		ep.DNSHistory = fqdn.NewDNSCache(0)
 	}
 
-	c.ResetTimer()
+	b.ResetTimer()
 	// Simulate parallel DNS responses from the upstream DNS for cilium.io and
 	// ebpf.io, done by every endpoint.
-	for i := 0; i < c.N; i++ {
-		wg.Add(1)
-		go func(ep *endpoint.Endpoint) {
-			defer wg.Done()
-			// Using a hardcoded string representing endpoint IP:port as this
-			// parameter is only used in logging. Not using the endpoint's IP
-			// so we don't spend any time in the benchmark on converting from
-			// net.IP to string.
-			c.Assert(ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.8:12345", 0, "10.96.64.1:53", &ciliumdns.Msg{
-				MsgHdr: ciliumdns.MsgHdr{
-					Response: true,
-				},
-				Question: []ciliumdns.Question{{
-					Name: dns.FQDN("cilium.io"),
-				}},
-				Answer: []ciliumdns.RR{&ciliumdns.A{
-					Hdr: ciliumdns.RR_Header{Name: dns.FQDN("cilium.io")},
-					A:   ciliumDNSRecord[dns.FQDN("cilium.io")].IPs[0],
-				}}}, "udp", true, &dnsproxy.ProxyRequestContext{}), IsNil)
+	for i := 0; i < b.N; i++ {
+		for _, ep := range endpoints {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Using a hardcoded string representing endpoint IP:port as this
+				// parameter is only used in logging. Not using the endpoint's IP
+				// so we don't spend any time in the benchmark on converting from
+				// net.IP to string.
+				require.Nil(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.8:12345", 0, "10.96.64.1:53", &ciliumdns.Msg{
+					MsgHdr: ciliumdns.MsgHdr{
+						Response: true,
+					},
+					Question: []ciliumdns.Question{{
+						Name: dns.FQDN("cilium.io"),
+					}},
+					Answer: []ciliumdns.RR{&ciliumdns.A{
+						Hdr: ciliumdns.RR_Header{Name: dns.FQDN("cilium.io")},
+						A:   ciliumDNSRecord[dns.FQDN("cilium.io")].IPs[0],
+					}}}, "udp", true, &dnsproxy.ProxyRequestContext{}))
 
-			c.Assert(ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.4:54321", 0, "10.96.64.1:53", &ciliumdns.Msg{
-				MsgHdr: ciliumdns.MsgHdr{
-					Response: true,
-				},
-				Compress: false,
-				Question: []ciliumdns.Question{{
-					Name: dns.FQDN("ebpf.io"),
-				}},
-				Answer: []ciliumdns.RR{&ciliumdns.A{
-					Hdr: ciliumdns.RR_Header{Name: dns.FQDN("ebpf.io")},
-					A:   ebpfDNSRecord[dns.FQDN("ebpf.io")].IPs[0],
-				}}}, "udp", true, &dnsproxy.ProxyRequestContext{}), IsNil)
-		}(endpoints[i%len(endpoints)])
+				require.Nil(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.4:54321", 0, "10.96.64.1:53", &ciliumdns.Msg{
+					MsgHdr: ciliumdns.MsgHdr{
+						Response: true,
+					},
+					Compress: false,
+					Question: []ciliumdns.Question{{
+						Name: dns.FQDN("ebpf.io"),
+					}},
+					Answer: []ciliumdns.RR{&ciliumdns.A{
+						Hdr: ciliumdns.RR_Header{Name: dns.FQDN("ebpf.io")},
+						A:   ebpfDNSRecord[dns.FQDN("ebpf.io")].IPs[0],
+					}}}, "udp", true, &dnsproxy.ProxyRequestContext{}))
+			}()
+		}
+		wg.Wait()
 	}
-
-	wg.Wait()
 }

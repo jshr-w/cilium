@@ -137,14 +137,49 @@ func getBackendServiceName(namespace string, services []corev1.Service, serviceI
 func toHTTPRoutes(listener gatewayv1.Listener, input []gatewayv1.HTTPRoute, services []corev1.Service, serviceImports []mcsapiv1alpha1.ServiceImport, grants []gatewayv1beta1.ReferenceGrant) []model.HTTPRoute {
 	var httpRoutes []model.HTTPRoute
 	for _, r := range input {
-		isListener := false
+
+		listenerIsParent := false
+		// Check parents to see if r can attach to them.
+		// We have to consider _both_ SectionName and Port
 		for _, parent := range r.Spec.ParentRefs {
-			if parent.SectionName == nil || *parent.SectionName == listener.Name {
-				isListener = true
+			// First, if both SectionName and Port are unset, attach
+			if parent.SectionName == nil && parent.Port == nil {
+				listenerIsParent = true
 				break
 			}
+
+			// Then, if SectionName is set, check combinations with Port.
+			if parent.SectionName != nil {
+				if *parent.SectionName != listener.Name {
+					// If SectionName is set but not equal, no other settings
+					// matter, so check the next parent.
+					continue
+				}
+
+				if parent.Port != nil && *parent.Port != listener.Port {
+					// If SectionName is set and equal, but Port is set and _unequal_,
+					//
+					continue
+				}
+
+				listenerIsParent = true
+				break
+			}
+
+			if parent.Port != nil {
+				if *parent.Port != listener.Port {
+					// If Port is set but not equal, no other settings
+					// matter, check the next parent.
+					continue
+				}
+
+				listenerIsParent = true
+				break
+			}
+
 		}
-		if !isListener {
+
+		if !listenerIsParent {
 			continue
 		}
 
@@ -157,129 +192,137 @@ func toHTTPRoutes(listener gatewayv1.Listener, input []gatewayv1.HTTPRoute, serv
 		if len(computedHost) == 1 && computedHost[0] == allHosts {
 			computedHost = nil
 		}
-		for _, rule := range r.Spec.Rules {
-			var backendHTTPFilters []*model.BackendHTTPFilter
-			bes := make([]model.Backend, 0, len(rule.BackendRefs))
-			for _, be := range rule.BackendRefs {
-				if !helpers.IsBackendReferenceAllowed(r.GetNamespace(), be.BackendRef, gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"), grants) {
-					continue
+
+		httpRoutes = append(httpRoutes, extractRoutes(int32(listener.Port), computedHost, r, services, serviceImports, grants)...)
+
+	}
+	return httpRoutes
+}
+
+func extractRoutes(listenerPort int32, hostnames []string, hr gatewayv1.HTTPRoute, services []corev1.Service, serviceImports []mcsapiv1alpha1.ServiceImport, grants []gatewayv1beta1.ReferenceGrant) []model.HTTPRoute {
+	var httpRoutes []model.HTTPRoute
+	for _, rule := range hr.Spec.Rules {
+		var backendHTTPFilters []*model.BackendHTTPFilter
+		bes := make([]model.Backend, 0, len(rule.BackendRefs))
+		for _, be := range rule.BackendRefs {
+			if !helpers.IsBackendReferenceAllowed(hr.GetNamespace(), be.BackendRef, gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"), grants) {
+				continue
+			}
+			svcName, err := getBackendServiceName(helpers.NamespaceDerefOr(be.Namespace, hr.Namespace), services, serviceImports, be.BackendObjectReference)
+			if err != nil {
+				continue
+			}
+			if svcName != string(be.Name) {
+				be = *be.DeepCopy()
+				be.BackendRef.BackendObjectReference = gatewayv1beta1.BackendObjectReference{
+					Name:      gatewayv1beta1.ObjectName(svcName),
+					Port:      be.Port,
+					Namespace: be.Namespace,
 				}
-				svcName, err := getBackendServiceName(helpers.NamespaceDerefOr(be.Namespace, r.Namespace), services, serviceImports, be.BackendObjectReference)
-				if err != nil {
-					continue
-				}
-				if svcName != string(be.Name) {
-					be = *be.DeepCopy()
-					be.BackendRef.BackendObjectReference = gatewayv1beta1.BackendObjectReference{
-						Name:      gatewayv1beta1.ObjectName(svcName),
-						Port:      be.Port,
-						Namespace: be.Namespace,
+			}
+			if be.BackendRef.Port == nil {
+				// must have port for Service reference
+				continue
+			}
+			svc := getServiceSpec(string(be.Name), helpers.NamespaceDerefOr(be.Namespace, hr.Namespace), services)
+			if svc != nil {
+				bes = append(bes, backendToModelBackend(*svc, be.BackendRef, hr.Namespace))
+				for _, f := range be.Filters {
+					switch f.Type {
+					case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+						backendHTTPFilters = append(backendHTTPFilters, &model.BackendHTTPFilter{
+							Name: fmt.Sprintf("%s:%s:%d", helpers.NamespaceDerefOr(be.Namespace, hr.Namespace), be.Name, uint32(*be.Port)),
+							RequestHeaderFilter: &model.HTTPHeaderFilter{
+								HeadersToAdd:    toHTTPHeaders(f.RequestHeaderModifier.Add),
+								HeadersToSet:    toHTTPHeaders(f.RequestHeaderModifier.Set),
+								HeadersToRemove: f.RequestHeaderModifier.Remove,
+							},
+						})
+					case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+						backendHTTPFilters = append(backendHTTPFilters, &model.BackendHTTPFilter{
+							Name: fmt.Sprintf("%s:%s:%d", helpers.NamespaceDerefOr(be.Namespace, hr.Namespace), be.Name, uint32(*be.Port)),
+							ResponseHeaderModifier: &model.HTTPHeaderFilter{
+								HeadersToAdd:    toHTTPHeaders(f.ResponseHeaderModifier.Add),
+								HeadersToSet:    toHTTPHeaders(f.ResponseHeaderModifier.Set),
+								HeadersToRemove: f.ResponseHeaderModifier.Remove,
+							},
+						})
 					}
 				}
-				if be.BackendRef.Port == nil {
-					// must have port for Service reference
-					continue
+			}
+		}
+
+		var dr *model.DirectResponse
+		if len(bes) == 0 {
+			dr = &model.DirectResponse{
+				StatusCode: 500,
+			}
+		}
+
+		var requestHeaderFilter *model.HTTPHeaderFilter
+		var responseHeaderFilter *model.HTTPHeaderFilter
+		var requestRedirectFilter *model.HTTPRequestRedirectFilter
+		var rewriteFilter *model.HTTPURLRewriteFilter
+		var requestMirrors []*model.HTTPRequestMirror
+
+		for _, f := range rule.Filters {
+			switch f.Type {
+			case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+				requestHeaderFilter = &model.HTTPHeaderFilter{
+					HeadersToAdd:    toHTTPHeaders(f.RequestHeaderModifier.Add),
+					HeadersToSet:    toHTTPHeaders(f.RequestHeaderModifier.Set),
+					HeadersToRemove: f.RequestHeaderModifier.Remove,
 				}
-				svc := getServiceSpec(string(be.Name), helpers.NamespaceDerefOr(be.Namespace, r.Namespace), services)
+			case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+				responseHeaderFilter = &model.HTTPHeaderFilter{
+					HeadersToAdd:    toHTTPHeaders(f.ResponseHeaderModifier.Add),
+					HeadersToSet:    toHTTPHeaders(f.ResponseHeaderModifier.Set),
+					HeadersToRemove: f.ResponseHeaderModifier.Remove,
+				}
+			case gatewayv1.HTTPRouteFilterRequestRedirect:
+				requestRedirectFilter = toHTTPRequestRedirectFilter(listenerPort, f.RequestRedirect)
+			case gatewayv1.HTTPRouteFilterURLRewrite:
+				rewriteFilter = toHTTPRewriteFilter(f.URLRewrite)
+			case gatewayv1.HTTPRouteFilterRequestMirror:
+				svc := getServiceSpec(string(f.RequestMirror.BackendRef.Name), helpers.NamespaceDerefOr(f.RequestMirror.BackendRef.Namespace, hr.Namespace), services)
 				if svc != nil {
-					bes = append(bes, backendToModelBackend(*svc, be.BackendRef, r.Namespace))
-					for _, f := range be.Filters {
-						switch f.Type {
-						case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
-							backendHTTPFilters = append(backendHTTPFilters, &model.BackendHTTPFilter{
-								Name: fmt.Sprintf("%s:%s:%d", helpers.NamespaceDerefOr(be.Namespace, r.Namespace), be.Name, uint32(*be.Port)),
-								RequestHeaderFilter: &model.HTTPHeaderFilter{
-									HeadersToAdd:    toHTTPHeaders(f.RequestHeaderModifier.Add),
-									HeadersToSet:    toHTTPHeaders(f.RequestHeaderModifier.Set),
-									HeadersToRemove: f.RequestHeaderModifier.Remove,
-								},
-							})
-						case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
-							backendHTTPFilters = append(backendHTTPFilters, &model.BackendHTTPFilter{
-								Name: fmt.Sprintf("%s:%s:%d", helpers.NamespaceDerefOr(be.Namespace, r.Namespace), be.Name, uint32(*be.Port)),
-								ResponseHeaderModifier: &model.HTTPHeaderFilter{
-									HeadersToAdd:    toHTTPHeaders(f.ResponseHeaderModifier.Add),
-									HeadersToSet:    toHTTPHeaders(f.ResponseHeaderModifier.Set),
-									HeadersToRemove: f.ResponseHeaderModifier.Remove,
-								},
-							})
-						}
-					}
+					requestMirrors = append(requestMirrors, toHTTPRequestMirror(*svc, f.RequestMirror, hr.Namespace))
 				}
 			}
+		}
 
-			var dr *model.DirectResponse
-			if len(bes) == 0 {
-				dr = &model.DirectResponse{
-					StatusCode: 500,
-				}
-			}
+		if len(rule.Matches) == 0 {
+			httpRoutes = append(httpRoutes, model.HTTPRoute{
+				Hostnames:              hostnames,
+				Backends:               bes,
+				BackendHTTPFilters:     backendHTTPFilters,
+				DirectResponse:         dr,
+				RequestHeaderFilter:    requestHeaderFilter,
+				ResponseHeaderModifier: responseHeaderFilter,
+				RequestRedirect:        requestRedirectFilter,
+				Rewrite:                rewriteFilter,
+				RequestMirrors:         requestMirrors,
+				Timeout:                toTimeout(rule.Timeouts),
+			})
+		}
 
-			var requestHeaderFilter *model.HTTPHeaderFilter
-			var responseHeaderFilter *model.HTTPHeaderFilter
-			var requestRedirectFilter *model.HTTPRequestRedirectFilter
-			var rewriteFilter *model.HTTPURLRewriteFilter
-			var requestMirrors []*model.HTTPRequestMirror
-
-			for _, f := range rule.Filters {
-				switch f.Type {
-				case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
-					requestHeaderFilter = &model.HTTPHeaderFilter{
-						HeadersToAdd:    toHTTPHeaders(f.RequestHeaderModifier.Add),
-						HeadersToSet:    toHTTPHeaders(f.RequestHeaderModifier.Set),
-						HeadersToRemove: f.RequestHeaderModifier.Remove,
-					}
-				case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
-					responseHeaderFilter = &model.HTTPHeaderFilter{
-						HeadersToAdd:    toHTTPHeaders(f.ResponseHeaderModifier.Add),
-						HeadersToSet:    toHTTPHeaders(f.ResponseHeaderModifier.Set),
-						HeadersToRemove: f.ResponseHeaderModifier.Remove,
-					}
-				case gatewayv1.HTTPRouteFilterRequestRedirect:
-					requestRedirectFilter = toHTTPRequestRedirectFilter(listener, f.RequestRedirect)
-				case gatewayv1.HTTPRouteFilterURLRewrite:
-					rewriteFilter = toHTTPRewriteFilter(f.URLRewrite)
-				case gatewayv1.HTTPRouteFilterRequestMirror:
-					svc := getServiceSpec(string(f.RequestMirror.BackendRef.Name), helpers.NamespaceDerefOr(f.RequestMirror.BackendRef.Namespace, r.Namespace), services)
-					if svc != nil {
-						requestMirrors = append(requestMirrors, toHTTPRequestMirror(*svc, f.RequestMirror, r.Namespace))
-					}
-				}
-			}
-
-			if len(rule.Matches) == 0 {
-				httpRoutes = append(httpRoutes, model.HTTPRoute{
-					Hostnames:              computedHost,
-					Backends:               bes,
-					BackendHTTPFilters:     backendHTTPFilters,
-					DirectResponse:         dr,
-					RequestHeaderFilter:    requestHeaderFilter,
-					ResponseHeaderModifier: responseHeaderFilter,
-					RequestRedirect:        requestRedirectFilter,
-					Rewrite:                rewriteFilter,
-					RequestMirrors:         requestMirrors,
-					Timeout:                toTimeout(rule.Timeouts),
-				})
-			}
-
-			for _, match := range rule.Matches {
-				httpRoutes = append(httpRoutes, model.HTTPRoute{
-					Hostnames:              computedHost,
-					PathMatch:              toPathMatch(match),
-					HeadersMatch:           toHeaderMatch(match),
-					QueryParamsMatch:       toQueryMatch(match),
-					Method:                 (*string)(match.Method),
-					Backends:               bes,
-					BackendHTTPFilters:     backendHTTPFilters,
-					DirectResponse:         dr,
-					RequestHeaderFilter:    requestHeaderFilter,
-					ResponseHeaderModifier: responseHeaderFilter,
-					RequestRedirect:        requestRedirectFilter,
-					Rewrite:                rewriteFilter,
-					RequestMirrors:         requestMirrors,
-					Timeout:                toTimeout(rule.Timeouts),
-				})
-			}
+		for _, match := range rule.Matches {
+			httpRoutes = append(httpRoutes, model.HTTPRoute{
+				Hostnames:              hostnames,
+				PathMatch:              toPathMatch(match),
+				HeadersMatch:           toHeaderMatch(match),
+				QueryParamsMatch:       toQueryMatch(match),
+				Method:                 (*string)(match.Method),
+				Backends:               bes,
+				BackendHTTPFilters:     backendHTTPFilters,
+				DirectResponse:         dr,
+				RequestHeaderFilter:    requestHeaderFilter,
+				ResponseHeaderModifier: responseHeaderFilter,
+				RequestRedirect:        requestRedirectFilter,
+				Rewrite:                rewriteFilter,
+				RequestMirrors:         requestMirrors,
+				Timeout:                toTimeout(rule.Timeouts),
+			})
 		}
 	}
 	return httpRoutes
@@ -475,7 +518,7 @@ func toTLSRoutes(listener gatewayv1beta1.Listener, input []gatewayv1alpha2.TLSRo
 	return tlsRoutes
 }
 
-func toHTTPRequestRedirectFilter(listener gatewayv1beta1.Listener, redirect *gatewayv1.HTTPRequestRedirectFilter) *model.HTTPRequestRedirectFilter {
+func toHTTPRequestRedirectFilter(listenerPort int32, redirect *gatewayv1.HTTPRequestRedirectFilter) *model.HTTPRequestRedirectFilter {
 	if redirect == nil {
 		return nil
 	}
@@ -496,7 +539,7 @@ func toHTTPRequestRedirectFilter(listener gatewayv1beta1.Listener, redirect *gat
 			// If redirect scheme is empty, the redirect port MUST be the Gateway
 			// Listener port.
 			// Refer to: https://github.com/kubernetes-sigs/gateway-api/blob/35fe25d1384a41c9b89dd5af7ae3214c431f008c/apis/v1/httproute_types.go#L1040-L1041
-			redirectPort = model.AddressOf(int32(listener.Port))
+			redirectPort = model.AddressOf(listenerPort)
 		}
 	} else {
 		redirectPort = (*int32)(redirect.Port)

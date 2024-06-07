@@ -5,8 +5,8 @@ package endpoint
 
 import (
 	"context"
+	"testing"
 
-	. "github.com/cilium/checkmate"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/api/v1/models"
@@ -14,7 +14,9 @@ import (
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
 
-func (s *EndpointSuite) TestGetCiliumEndpointStatus(c *C) {
+func TestGetCiliumEndpointStatus(t *testing.T) {
+	s := setupEndpointSuite(t)
+
 	e, err := NewEndpointFromChangeModel(context.TODO(), s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, s.mgr, &models.EndpointChangeRequest{
 		Addressing: &models.AddressPair{
 			IPV4: "192.168.1.100",
@@ -33,14 +35,14 @@ func (s *EndpointSuite) TestGetCiliumEndpointStatus(c *C) {
 		},
 		State: models.EndpointStateWaitingDashForDashIdentity.Pointer(),
 	})
-	require.Nil(c, err)
+	require.Nil(t, err)
 
 	status := e.GetCiliumEndpointStatus()
 
-	require.Equal(c, int64(200), status.ID)
-	require.Equal(c, string(models.EndpointStateWaitingDashForDashIdentity), status.State)
-	require.Nil(c, status.Log)
-	require.Equal(c, &models.EndpointIdentifiers{
+	require.Equal(t, int64(200), status.ID)
+	require.Equal(t, string(models.EndpointStateWaitingDashForDashIdentity), status.State)
+	require.Nil(t, status.Log)
+	require.Equal(t, &models.EndpointIdentifiers{
 		ContainerID:     "ContainerID",
 		CniAttachmentID: "ContainerID",
 		ContainerName:   "ContainerName",
@@ -48,8 +50,8 @@ func (s *EndpointSuite) TestGetCiliumEndpointStatus(c *C) {
 		K8sPodName:      "PodName",
 		PodName:         "Namespace/PodName",
 	}, status.ExternalIdentifiers)
-	require.Nil(c, status.Identity)
-	require.Equal(c, &v2.EndpointNetworking{Addressing: []*v2.AddressPair{{IPV4: "192.168.1.100", IPV6: "f00d::a10:0:0:abcd"}}, NodeIP: "<nil>"}, status.Networking)
-	require.Equal(c, v2.EncryptionSpec{Key: 0}, status.Encryption)
-	require.Equal(c, models.NamedPorts{}, status.NamedPorts)
+	require.Nil(t, status.Identity)
+	require.Equal(t, &v2.EndpointNetworking{Addressing: []*v2.AddressPair{{IPV4: "192.168.1.100", IPV6: "f00d::a10:0:0:abcd"}}, NodeIP: "<nil>"}, status.Networking)
+	require.Equal(t, v2.EncryptionSpec{Key: 0}, status.Encryption)
+	require.Equal(t, models.NamedPorts{}, status.NamedPorts)
 }

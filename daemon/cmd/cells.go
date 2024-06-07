@@ -4,7 +4,10 @@
 package cmd
 
 import (
+	"net/http"
+
 	"github.com/cilium/hive/cell"
+	"github.com/cilium/statedb"
 	"github.com/sirupsen/logrus"
 
 	healthApi "github.com/cilium/cilium/api/v1/health/server"
@@ -14,7 +17,9 @@ import (
 	"github.com/cilium/cilium/daemon/restapi"
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/auth"
+	"github.com/cilium/cilium/pkg/bgp/speaker"
 	"github.com/cilium/cilium/pkg/bgpv1"
+	cgroup "github.com/cilium/cilium/pkg/cgroups/manager"
 	"github.com/cilium/cilium/pkg/ciliumenvoyconfig"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
@@ -36,6 +41,7 @@ import (
 	"github.com/cilium/cilium/pkg/l2announcer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
+	natStats "github.com/cilium/cilium/pkg/maps/nat/stats"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	nodeManager "github.com/cilium/cilium/pkg/node/manager"
@@ -183,6 +189,9 @@ var (
 		// The BGP Control Plane which enables various BGP related interop.
 		bgpv1.Cell,
 
+		// The MetalLB BGP speaker enables support for MetalLB BGP.
+		speaker.Cell,
+
 		// Brokers datapath signals from signalmap
 		signal.Cell,
 
@@ -224,10 +233,17 @@ var (
 		// The node discovery cell provides the local node configuration and node discovery
 		// which communicate changes in local node information to the API server or KVStore.
 		nodediscovery.Cell,
+
+		// Cgroup manager maintains Kubernetes and low-level metadata (cgroup path and
+		// cgroup id) for local pods and their containers.
+		cgroup.Cell,
+
+		// NAT stats provides stat computation and tables for NAT map bpf maps.
+		natStats.Cell,
 	)
 )
 
-func configureAPIServer(cfg *option.DaemonConfig, s *server.Server, swaggerSpec *server.Spec) {
+func configureAPIServer(cfg *option.DaemonConfig, s *server.Server, db *statedb.DB, swaggerSpec *server.Spec) {
 	s.EnabledListeners = []string{"unix"}
 	s.SocketPath = cfg.SocketPath
 	s.ReadTimeout = apiTimeout
@@ -251,4 +267,12 @@ func configureAPIServer(cfg *option.DaemonConfig, s *server.Server, swaggerSpec 
 		}
 	}
 	api.DisableAPIs(swaggerSpec.DeniedAPIs, s.GetAPI().AddMiddlewareFor)
+
+	s.ConfigureAPI()
+
+	// Add the /statedb HTTP handler
+	mux := http.NewServeMux()
+	mux.Handle("/", s.GetHandler())
+	mux.Handle("/statedb/", http.StripPrefix("/statedb", db.HTTPHandler()))
+	s.SetHandler(mux)
 }

@@ -18,7 +18,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	xrate "golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +26,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	operatorApi "github.com/cilium/cilium/api/v1/operator/server"
+	ciliumdbg "github.com/cilium/cilium/cilium-dbg/cmd"
 	"github.com/cilium/cilium/operator/api"
 	"github.com/cilium/cilium/operator/auth"
 	"github.com/cilium/cilium/operator/endpointgc"
@@ -41,10 +41,12 @@ import (
 	gatewayapi "github.com/cilium/cilium/operator/pkg/gateway-api"
 	"github.com/cilium/cilium/operator/pkg/ingress"
 	"github.com/cilium/cilium/operator/pkg/lbipam"
+	"github.com/cilium/cilium/operator/pkg/networkpolicy"
 	"github.com/cilium/cilium/operator/pkg/nodeipam"
 	"github.com/cilium/cilium/operator/pkg/secretsync"
 	operatorWatchers "github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/clustermesh/endpointslicesync"
+	"github.com/cilium/cilium/pkg/clustermesh/mcsapi"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -99,6 +101,9 @@ var (
 
 		// Provides Clientset, API for accessing Kubernetes objects.
 		k8sClient.Cell,
+
+		// Provides a ClientBuilderFunc that can be used by other cells to create a client.
+		k8sClient.ClientBuilderCell,
 
 		// Provides the modular metrics registry, metric HTTP server and legacy metrics cell.
 		operatorMetrics.Cell,
@@ -185,6 +190,7 @@ var (
 			auth.Cell,
 			store.Cell,
 			endpointslicesync.Cell,
+			mcsapi.Cell,
 			legacyCell,
 
 			// When running in kvstore mode, the start hook of the identity GC
@@ -224,6 +230,9 @@ var (
 
 			// Cilium L7 LoadBalancing with Envoy.
 			ciliumenvoyconfig.Cell,
+
+			// Informational policy validation.
+			networkpolicy.Cell,
 		),
 	)
 
@@ -275,6 +284,8 @@ func NewOperatorCmd(h *hive.Hive) *cobra.Command {
 
 	cmd.AddCommand(
 		MetricsCmd,
+		StatusCmd,
+		ciliumdbg.TroubleshootCmd,
 		h.Command(),
 	)
 
@@ -598,7 +609,7 @@ func (legacy *legacyOnLeader) onStart(_ cell.HookContext) error {
 							// Create another service cache that contains the
 							// k8s service for etcd. As soon the k8s caches are
 							// synced, this hijack will stop happening.
-							sc := k8s.NewServiceCache(nil)
+							sc := k8s.NewServiceCache(nil, nil)
 							slimSvcObj, err := k8s.TransformToK8sService(k8sSvc)
 							if err != nil {
 								scopedLog.WithFields(logrus.Fields{
@@ -666,17 +677,6 @@ func (legacy *legacyOnLeader) onStart(_ cell.HookContext) error {
 		if err := ciliumNodeSynchronizer.Start(legacy.ctx, &legacy.wg); err != nil {
 			log.WithError(err).Fatal("Unable to setup cilium node synchronizer")
 		}
-
-		// This is done to avoid accumulating stale updates and thus
-		// hindering scalability for large clusters.
-		RunCNPStatusNodesCleaner(
-			legacy.ctx,
-			legacy.clientset,
-			xrate.NewLimiter(
-				xrate.Limit(operatorOption.Config.CNPStatusCleanupQPS),
-				operatorOption.Config.CNPStatusCleanupBurst,
-			),
-		)
 
 		if operatorOption.Config.NodesGCInterval != 0 {
 			operatorWatchers.RunCiliumNodeGC(legacy.ctx, &legacy.wg, legacy.clientset, ciliumNodeSynchronizer.ciliumNodeStore, operatorOption.Config.NodesGCInterval)

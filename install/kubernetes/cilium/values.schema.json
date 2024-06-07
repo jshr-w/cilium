@@ -477,9 +477,6 @@
             }
           },
           "type": "object"
-        },
-        "v2Enabled": {
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -513,6 +510,9 @@
           ]
         },
         "disableExternalIPMitigation": {
+          "type": "boolean"
+        },
+        "enableTCX": {
           "type": "boolean"
         },
         "events": {
@@ -710,6 +710,60 @@
       },
       "type": "object"
     },
+    "ciliumEndpointSlice": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "rateLimits": {
+          "items": {
+            "anyOf": [
+              {
+                "properties": {
+                  "burst": {
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "nodes": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "burst": {
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "nodes": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "burst": {
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "nodes": {
+                    "type": "integer"
+                  }
+                }
+              }
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "cleanBpfState": {
       "type": "boolean"
     },
@@ -817,6 +871,12 @@
                     }
                   },
                   "type": "object"
+                },
+                "storageMedium": {
+                  "enum": [
+                    "Disk",
+                    "Memory"
+                  ]
                 }
               },
               "type": "object"
@@ -1122,6 +1182,13 @@
                 "annotations": {
                   "type": "object"
                 },
+                "enableSessionAffinity": {
+                  "enum": [
+                    "HAOnly",
+                    "Always",
+                    "Never"
+                  ]
+                },
                 "externalTrafficPolicy": {
                   "enum": [
                     "Local",
@@ -1189,6 +1256,9 @@
                     }
                   },
                   "type": "object"
+                },
+                "enableSecrets": {
+                  "type": "boolean"
                 },
                 "remote": {
                   "properties": {
@@ -1269,6 +1339,9 @@
           "type": "object"
         },
         "enableEndpointSliceSynchronization": {
+          "type": "boolean"
+        },
+        "enableMCSAPISupport": {
           "type": "boolean"
         },
         "maxConnectedClusters": {
@@ -2064,6 +2137,12 @@
             }
           },
           "type": "object"
+        },
+        "xffNumTrustedHopsL7PolicyEgress": {
+          "type": "integer"
+        },
+        "xffNumTrustedHopsL7PolicyIngress": {
+          "type": "integer"
         }
       },
       "type": "object"
@@ -2284,6 +2363,10 @@
       "items": {},
       "type": "array"
     },
+    "extraInitContainers": {
+      "items": {},
+      "type": "array"
+    },
     "extraVolumeMounts": {
       "items": {},
       "type": "array"
@@ -2292,8 +2375,14 @@
       "items": {},
       "type": "array"
     },
+    "forceDeviceDetection": {
+      "type": "boolean"
+    },
     "gatewayAPI": {
       "properties": {
+        "enableAlpn": {
+          "type": "boolean"
+        },
         "enableAppProtocol": {
           "type": "boolean"
         },
@@ -4600,52 +4689,6 @@
             "anyOf": [
               {
                 "properties": {
-                  "effect": {
-                    "type": "string"
-                  },
-                  "key": {
-                    "type": "string"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "effect": {
-                    "type": "string"
-                  },
-                  "key": {
-                    "type": "string"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "effect": {
-                    "type": "string"
-                  },
-                  "key": {
-                    "type": "string"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "effect": {
-                    "type": "string"
-                  },
-                  "key": {
-                    "type": "string"
-                  },
-                  "value": {
-                    "type": "string"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "key": {
-                    "type": "string"
-                  },
                   "operator": {
                     "type": "string"
                   }

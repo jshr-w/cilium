@@ -59,20 +59,7 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 		option.Config.EnableSessionAffinity = true
 	}
 
-	if option.Config.KubeProxyReplacement != option.KubeProxyReplacementFalse &&
-		option.Config.EnableEnvoyConfig && !option.Config.EnableIPSec &&
-		!option.Config.EnableNodePort {
-		// CiliumEnvoyConfig L7 LB only works with bpf node port enabled
-		log.Infof("Auto-enabling %s for %s",
-			option.EnableNodePort, option.EnableEnvoyConfig)
-		option.Config.EnableNodePort = true
-	}
-
 	if option.Config.EnableNodePort {
-		if option.Config.EnableIPSec {
-			return fmt.Errorf("IPSec cannot be used with BPF NodePort")
-		}
-
 		if option.Config.NodePortMode != option.NodePortModeSNAT &&
 			option.Config.NodePortMode != option.NodePortModeDSR &&
 			option.Config.NodePortMode != option.NodePortModeHybrid {
@@ -184,9 +171,7 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 				return fmt.Errorf("Failed to initialize maglev hash seeds: %w", err)
 			}
 		}
-	}
 
-	if option.Config.EnableNodePort {
 		if option.Config.TunnelingEnabled() && tunnelConfig.Protocol() == tunnel.VXLAN &&
 			option.Config.LoadBalancerUsesDSR() {
 			return fmt.Errorf("Node Port %q mode cannot be used with %s tunneling.", option.Config.NodePortMode, tunnel.VXLAN)
@@ -359,7 +344,7 @@ func probeKubeProxyReplacementOptions(sysctl sysctl.Sysctl) error {
 // finishKubeProxyReplacementInit finishes initialization of kube-proxy
 // replacement after all devices are known.
 func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Device) error {
-	if !(option.Config.EnableNodePort || option.Config.EnableWireguard) {
+	if !option.Config.EnableNodePort {
 		// Make sure that NodePort dependencies are disabled
 		disableNodePort()
 		return nil

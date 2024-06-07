@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
@@ -40,6 +41,7 @@ import (
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/proxy"
+	"github.com/cilium/cilium/pkg/resiliency"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -175,20 +177,25 @@ func getEndpointIDHandler(d *Daemon, params GetEndpointIDParams) middleware.Resp
 // endpoint metadata. It implements endpoint.MetadataResolverCB.
 // The returned pod is deepcopied which means the its fields can be written
 // into.
-func (d *Daemon) fetchK8sMetadataForEndpoint(nsName, podName string) (*slim_corev1.Pod, []slim_corev1.ContainerPort, labels.Labels, labels.Labels, map[string]string, error) {
+func (d *Daemon) fetchK8sMetadataForEndpoint(nsName, podName string) (*slim_corev1.Pod, *endpoint.K8sMetadata, error) {
 	ns, p, err := d.endpointMetadataFetcher.Fetch(nsName, podName)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	containerPorts, lbls, annotations, err := k8s.GetPodMetadata(ns, p)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	k8sLbls := labels.Map2Labels(lbls, labels.LabelSourceK8s)
 	identityLabels, infoLabels := labelsfilter.Filter(k8sLbls)
-	return p, containerPorts, identityLabels, infoLabels, annotations, nil
+	return p, &endpoint.K8sMetadata{
+		ContainerPorts: containerPorts,
+		IdentityLabels: identityLabels,
+		InfoLabels:     infoLabels,
+		Annotations:    annotations,
+	}, nil
 }
 
 type cachedEndpointMetadataFetcher struct {
@@ -356,6 +363,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 		"datapathConfiguration":      epTemplate.DatapathConfiguration,
 		logfields.Interface:          epTemplate.InterfaceName,
 		logfields.K8sPodName:         epTemplate.K8sNamespace + "/" + epTemplate.K8sPodName,
+		logfields.K8sUID:             epTemplate.K8sUID,
 		logfields.Labels:             epTemplate.Labels,
 		"sync-build":                 epTemplate.SyncBuildEndpoint,
 	}).Info("Create endpoint request")
@@ -429,29 +437,52 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 	identityLbls := maps.Clone(apiLabels)
 
 	if ep.K8sNamespaceAndPodNameIsSet() && d.clientset.IsEnabled() {
-		pod, cp, k8sIdentityLbls, k8sInfoLbls, annotations, err := d.fetchK8sMetadataForEndpoint(ep.K8sNamespace, ep.K8sPodName)
+		pod, k8sMetadata, err := d.handleOutdatedPodInformer(ctx, ep)
+		if errors.Is(err, podStoreOutdatedErr) {
+			log.WithFields(logrus.Fields{
+				logfields.K8sPodName: ep.K8sNamespace + "/" + ep.K8sPodName,
+				logfields.K8sUID:     ep.K8sUID,
+			}).Warn("Timeout occurred waiting for Pod store, fetching latest Pod via the apiserver.")
+
+			// Fetch the latest instance of the pod because
+			// fetchK8sMetadataForEndpoint() returned a stale pod from the
+			// store. If there's a mismatch in UIDs, this is an indication of a
+			// StatefulSet workload that was restarted on the local node and we
+			// must handle it as a special case. See GH-30409.
+			if newPod, err2 := d.clientset.Slim().CoreV1().Pods(ep.K8sNamespace).Get(
+				ctx, ep.K8sPodName, metav1.GetOptions{},
+			); err2 != nil {
+				ep.Logger("api").WithError(err2).Warn(
+					"Failed to fetch Kubernetes Pod during detection of an outdated Pod UID. Endpoint will be created with the 'init' identity. " +
+						"The Endpoint will be updated with a real identity once the Kubernetes can be fetched.")
+				err = errors.Join(err, err2)
+			} else {
+				pod = newPod
+			}
+		}
+
 		if err != nil {
 			ep.Logger("api").WithError(err).Warning("Unable to fetch kubernetes labels")
 		} else {
 			ep.SetPod(pod)
-			ep.SetK8sMetadata(cp)
-			identityLbls.MergeLabels(k8sIdentityLbls)
-			infoLabels.MergeLabels(k8sInfoLbls)
-			if _, ok := annotations[bandwidth.IngressBandwidth]; ok {
+			ep.SetK8sMetadata(k8sMetadata.ContainerPorts)
+			identityLbls.MergeLabels(k8sMetadata.IdentityLabels)
+			infoLabels.MergeLabels(k8sMetadata.InfoLabels)
+			if _, ok := k8sMetadata.Annotations[bandwidth.IngressBandwidth]; ok {
 				log.WithFields(logrus.Fields{
 					logfields.K8sPodName:  epTemplate.K8sNamespace + "/" + epTemplate.K8sPodName,
-					logfields.Annotations: logfields.Repr(annotations),
+					logfields.Annotations: logfields.Repr(k8sMetadata.Annotations),
 				}).Warningf("Endpoint has %s annotation which is unsupported. This annotation is ignored.",
 					bandwidth.IngressBandwidth)
 			}
-			if _, ok := annotations[bandwidth.EgressBandwidth]; ok && !d.bwManager.Enabled() {
+			if _, ok := k8sMetadata.Annotations[bandwidth.EgressBandwidth]; ok && !d.bwManager.Enabled() {
 				log.WithFields(logrus.Fields{
 					logfields.K8sPodName:  epTemplate.K8sNamespace + "/" + epTemplate.K8sPodName,
-					logfields.Annotations: logfields.Repr(annotations),
+					logfields.Annotations: logfields.Repr(k8sMetadata.Annotations),
 				}).Warningf("Endpoint has %s annotation, but BPF bandwidth manager is disabled. This annotation is ignored.",
 					bandwidth.EgressBandwidth)
 			}
-			if hwAddr, ok := annotations[annotation.PodAnnotationMAC]; !ep.GetDisableLegacyIdentifiers() && ok {
+			if hwAddr, ok := k8sMetadata.Annotations[annotation.PodAnnotationMAC]; !ep.GetDisableLegacyIdentifiers() && ok {
 				m, err := mac.ParseMAC(hwAddr)
 				if err != nil {
 					log.WithField(logfields.K8sPodName, epTemplate.K8sNamespace+"/"+epTemplate.K8sPodName).
@@ -518,7 +549,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 		regenMetadata := &regeneration.ExternalRegenerationMetadata{
 			Reason:            "Initial build on endpoint creation",
 			ParentContext:     ctx,
-			RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+			RegenerationLevel: regeneration.RegenerateWithDatapath,
 		}
 		build, err := ep.SetRegenerateStateIfAlive(regenMetadata)
 		if err != nil {
@@ -558,6 +589,40 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 
 	return ep, 0, nil
 }
+
+func (d *Daemon) handleOutdatedPodInformer(
+	ctx context.Context,
+	ep *endpoint.Endpoint,
+) (pod *slim_corev1.Pod, k8sMetadata *endpoint.K8sMetadata, err error) {
+	var once sync.Once
+
+	// Average attempt is every 100ms.
+	err = resiliency.Retry(ctx, 2*time.Second, 20, func(_ context.Context, _ int) (bool, error) {
+		var err2 error
+		pod, k8sMetadata, err2 = d.fetchK8sMetadataForEndpoint(ep.K8sNamespace, ep.K8sPodName)
+		if ep.K8sUID == "" {
+			// If the CNI did not set the UID, then don't retry and just exit
+			// out of the loop to proceed as normal.
+			return true, nil
+		}
+
+		if pod != nil && ep.K8sUID != string(pod.GetUID()) {
+			once.Do(func() {
+				log.WithFields(logrus.Fields{
+					logfields.K8sPodName: ep.K8sNamespace + "/" + ep.K8sPodName,
+					logfields.K8sUID:     ep.K8sUID,
+				}).Warn("Detected outdated Pod UID during Endpoint creation. Endpoint creation cannot proceed with an outdated Pod store. Attempting to fetch latest Pod.")
+			})
+
+			return false, podStoreOutdatedErr
+		}
+		return true, err2
+	})
+
+	return pod, k8sMetadata, err
+}
+
+var podStoreOutdatedErr = errors.New("pod store outdated")
 
 func putEndpointIDHandler(d *Daemon, params PutEndpointIDParams) (resp middleware.Responder) {
 	if ep := params.Endpoint; ep != nil {
@@ -670,7 +735,7 @@ func patchEndpointIDHandler(d *Daemon, params PatchEndpointIDParams) middleware.
 	if reason != "" {
 		regenMetadata := &regeneration.ExternalRegenerationMetadata{
 			Reason:            reason,
-			RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+			RegenerationLevel: regeneration.RegenerateWithDatapath,
 		}
 		if !<-ep.Regenerate(regenMetadata) {
 			err := api.Error(PatchEndpointIDFailedCode,

@@ -22,9 +22,9 @@ import (
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/pkg/byteorder"
-	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	"github.com/cilium/cilium/pkg/hubble/parser/common"
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
+	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -34,9 +34,10 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/monitor"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
-	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
+	policyTypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
+	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
@@ -67,7 +68,7 @@ func TestL34Decode(t *testing.T) {
 		1, 0, 0, 0, // source labels
 		0, 0, 0, 0, // destination labels
 		0, 0, // destination ID
-		0x80,       // encrypt  bit
+		0x81,       // "established" trace reason with the encrypt bit set
 		0,          // flags
 		0, 0, 0, 0, // ifindex
 		246, 141, 178, 45, 33, 217, 246, 141, 178,
@@ -77,7 +78,7 @@ func TestL34Decode(t *testing.T) {
 		98, 0, 90, 176, 97, 0, 0}
 
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			if ip == netip.MustParseAddr("10.16.236.178") {
 				return &testutils.FakeEndpointInfo{
 					ID:           1234,
@@ -160,6 +161,8 @@ func TestL34Decode(t *testing.T) {
 
 	assert.Equal(t, []string{"host-192.168.60.11"}, f.GetSourceNames())
 	assert.Equal(t, "192.168.60.11", f.GetIP().GetSource())
+	assert.Equal(t, "", f.GetIP().GetSourceXlated())
+	assert.Equal(t, flowpb.TraceReason_ESTABLISHED, f.GetTraceReason())
 	assert.True(t, f.GetIP().GetEncrypted())
 	assert.Equal(t, uint32(6443), f.L4.GetTCP().GetSourcePort())
 	assert.Equal(t, "pod-192.168.60.11", f.GetSource().GetPodName())
@@ -203,7 +206,7 @@ func TestL34Decode(t *testing.T) {
 		0, 0, 0, 0, 0}
 
 	endpointGetter = &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			if ip == netip.MustParseAddr("ff02::1:ff00:b3e5") {
 				return &testutils.FakeEndpointInfo{
 					ID: 1234,
@@ -234,6 +237,7 @@ func TestL34Decode(t *testing.T) {
 	// second packet is ICMPv6 and the flags should be totally wiped out
 	assert.Equal(t, []string(nil), f.GetSourceNames())
 	assert.Equal(t, "ff02::1:ff00:b3e5", f.GetIP().GetSource())
+	assert.Equal(t, "", f.GetIP().GetSourceXlated())
 	assert.Equal(t, &flowpb.ICMPv6{Type: 135}, f.L4.GetICMPv6())
 	assert.Equal(t, "", f.GetSource().GetPodName())
 	assert.Equal(t, "", f.GetSource().GetNamespace())
@@ -304,9 +308,9 @@ func TestDecodeTraceNotify(t *testing.T) {
 	require.NoError(t, err)
 	identityGetter := &testutils.FakeIdentityGetter{OnGetIdentity: func(securityIdentity uint32) (*identity.Identity, error) {
 		if securityIdentity == uint32(tn.SrcLabel) {
-			return &identity.Identity{Labels: labels.NewLabelsFromModel([]string{"k8s:src=label"})}, nil
+			return &identity.Identity{Labels: labels.NewLabelsFromModel([]string{"k8s:src=label", "k8s:io.cilium.k8s.policy.cluster=cluster-name"})}, nil
 		} else if securityIdentity == uint32(tn.DstLabel) {
-			return &identity.Identity{Labels: labels.NewLabelsFromModel([]string{"k8s:dst=label"})}, nil
+			return &identity.Identity{Labels: labels.NewLabelsFromModel([]string{"k8s:dst=label", "k8s:io.cilium.k8s.policy.cluster=cluster-name"})}, nil
 		}
 		return nil, fmt.Errorf("identity not found for %d", securityIdentity)
 	}}
@@ -317,8 +321,10 @@ func TestDecodeTraceNotify(t *testing.T) {
 	f := &flowpb.Flow{}
 	err = parser.Decode(buf.Bytes(), f)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"k8s:src=label"}, f.GetSource().GetLabels())
-	assert.Equal(t, []string{"k8s:dst=label"}, f.GetDestination().GetLabels())
+	assert.Equal(t, []string{"k8s:io.cilium.k8s.policy.cluster=cluster-name", "k8s:src=label"}, f.GetSource().GetLabels())
+	assert.Equal(t, []string{"k8s:dst=label", "k8s:io.cilium.k8s.policy.cluster=cluster-name"}, f.GetDestination().GetLabels())
+	assert.Equal(t, "cluster-name", f.GetSource().GetClusterName())
+	assert.Equal(t, "cluster-name", f.GetDestination().GetClusterName())
 }
 
 func TestDecodeDropNotify(t *testing.T) {
@@ -384,7 +390,7 @@ func TestDecodePolicyVerdictNotify(t *testing.T) {
 	}
 
 	policyLabel := utils.GetPolicyLabels("foo-namespace", "web-policy", "1234-5678", utils.ResourceTypeCiliumNetworkPolicy)
-	policyKey := policy.Key{
+	policyKey := policyTypes.Key{
 		Identity:         uint32(remoteIdentity),
 		DestPort:         uint16(dstPort),
 		Nexthdr:          uint8(u8proto.TCP),
@@ -397,19 +403,19 @@ func TestDecodePolicyVerdictNotify(t *testing.T) {
 		PodName:      "xwing",
 		PodNamespace: "default",
 		Labels:       []string{"a", "b", "c"},
-		PolicyMap: map[policy.Key]labels.LabelArrayList{
+		PolicyMap: map[policyTypes.Key]labels.LabelArrayList{
 			policyKey: {policyLabel},
 		},
 		PolicyRevision: 1,
 	}
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			if ip == netip.MustParseAddr(localIP) {
 				return ep, true
 			}
 			return nil, false
 		},
-		OnGetEndpointInfoByID: func(id uint16) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfoByID: func(id uint16) (endpoint getters.EndpointInfo, ok bool) {
 			if uint64(id) == ep.ID {
 				return ep, true
 			}
@@ -519,6 +525,99 @@ func TestDecodeDropReason(t *testing.T) {
 	assert.Equal(t, flowpb.DropReason(reason), f.GetDropReasonDesc())
 }
 
+func TestDecodeTraceReason(t *testing.T) {
+	parser, err := New(log, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	parseFlow := func(event interface{}, srcIPv4, dstIPv4 string) *flowpb.Flow {
+		data, err := testutils.CreateL3L4Payload(event,
+			&layers.Ethernet{
+				SrcMAC:       net.HardwareAddr{1, 2, 3, 4, 5, 6},
+				DstMAC:       net.HardwareAddr{7, 8, 9, 0, 1, 2},
+				EthernetType: layers.EthernetTypeIPv4,
+			},
+			&layers.IPv4{SrcIP: net.ParseIP(srcIPv4), DstIP: net.ParseIP(dstIPv4)})
+		require.NoError(t, err)
+		f := &flowpb.Flow{}
+		err = parser.Decode(data, f)
+		require.NoError(t, err)
+		return f
+	}
+
+	var tt = []struct {
+		name   string
+		reason uint8
+		want   flowpb.TraceReason
+	}{
+		{
+			name:   "unknown",
+			reason: monitor.TraceReasonUnknown,
+			want:   flowpb.TraceReason_TRACE_REASON_UNKNOWN,
+		},
+		{
+			name:   "new",
+			reason: monitor.TraceReasonPolicy,
+			want:   flowpb.TraceReason_NEW,
+		},
+		{
+			name:   "established",
+			reason: monitor.TraceReasonCtEstablished,
+			want:   flowpb.TraceReason_ESTABLISHED,
+		},
+		{
+			name:   "reply",
+			reason: monitor.TraceReasonCtReply,
+			want:   flowpb.TraceReason_REPLY,
+		},
+		{
+			name:   "related",
+			reason: monitor.TraceReasonCtRelated,
+			want:   flowpb.TraceReason_RELATED,
+		},
+		{
+			// "reopened" is deprecated, as the datapath no longer returns it
+			name:   "reopened",
+			reason: monitor.TraceReasonCtDeprecatedReopened,
+			want:   flowpb.TraceReason_REOPENED,
+		},
+		{
+			name:   "srv6-encap",
+			reason: monitor.TraceReasonSRv6Encap,
+			want:   flowpb.TraceReason_SRV6_ENCAP,
+		},
+		{
+			name:   "srv6-decap",
+			reason: monitor.TraceReasonSRv6Decap,
+			want:   flowpb.TraceReason_SRV6_DECAP,
+		},
+		{
+			name:   "encrypt-overlay",
+			reason: monitor.TraceReasonEncryptOverlay,
+			want:   flowpb.TraceReason_ENCRYPT_OVERLAY,
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			tn := monitor.TraceNotifyV0{
+				Type:   byte(monitorAPI.MessageTypeTrace),
+				Reason: tc.reason,
+			}
+			f := parseFlow(tn, "1.2.3.4", "5.6.7.8")
+			assert.Equal(t, tc.want, f.GetTraceReason())
+			assert.False(t, f.GetIP().GetEncrypted())
+		})
+		t.Run(tc.name+" encrypted", func(t *testing.T) {
+			tn := monitor.TraceNotifyV0{
+				Type:   byte(monitorAPI.MessageTypeTrace),
+				Reason: tc.reason | monitor.TraceReasonEncryptMask,
+			}
+			f := parseFlow(tn, "1.2.3.4", "5.6.7.8")
+			assert.Equal(t, tc.want, f.GetTraceReason())
+			assert.True(t, f.GetIP().GetEncrypted())
+		})
+	}
+}
+
 func TestDecodeLocalIdentity(t *testing.T) {
 	tn := monitor.TraceNotifyV0{
 		Type:     byte(monitorAPI.MessageTypeTrace),
@@ -545,10 +644,10 @@ func TestDecodeLocalIdentity(t *testing.T) {
 }
 
 func TestDecodeTrafficDirection(t *testing.T) {
-	localIP := "1.2.3.4"
+	localIP := netip.MustParseAddr("1.2.3.4")
 	localEP := uint16(1234)
 	hostEP := uint16(0x1092)
-	remoteIP := "5.6.7.8"
+	remoteIP := netip.MustParseAddr("5.6.7.8")
 	remoteID := uint32(5678)
 
 	directionFromProto := func(direction flowpb.TrafficDirection) trafficdirection.TrafficDirection {
@@ -562,7 +661,7 @@ func TestDecodeTrafficDirection(t *testing.T) {
 	}
 
 	policyLabel := labels.LabelArrayList{labels.ParseLabelArray("foo=bar")}
-	policyKey := policy.Key{
+	policyKey := policyTypes.Key{
 		Identity:         remoteID,
 		DestPort:         0,
 		Nexthdr:          0,
@@ -570,11 +669,11 @@ func TestDecodeTrafficDirection(t *testing.T) {
 	}
 
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
-			if ip == netip.MustParseAddr(localIP) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
+			if ip == localIP {
 				return &testutils.FakeEndpointInfo{
 					ID: uint64(localEP),
-					PolicyMap: map[policy.Key]labels.LabelArrayList{
+					PolicyMap: map[policyTypes.Key]labels.LabelArrayList{
 						policyKey: policyLabel,
 					},
 					PolicyRevision: 1,
@@ -586,14 +685,14 @@ func TestDecodeTrafficDirection(t *testing.T) {
 
 	parser, err := New(log, endpointGetter, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
-	parseFlow := func(event interface{}, srcIPv4, dstIPv4 string) *flowpb.Flow {
+	parseFlow := func(event any, srcIPv4, dstIPv4 netip.Addr) *flowpb.Flow {
 		data, err := testutils.CreateL3L4Payload(event,
 			&layers.Ethernet{
 				SrcMAC:       net.HardwareAddr{1, 2, 3, 4, 5, 6},
 				DstMAC:       net.HardwareAddr{7, 8, 9, 0, 1, 2},
 				EthernetType: layers.EthernetTypeIPv4,
 			},
-			&layers.IPv4{SrcIP: net.ParseIP(srcIPv4), DstIP: net.ParseIP(dstIPv4)})
+			&layers.IPv4{SrcIP: srcIPv4.AsSlice(), DstIP: dstIPv4.AsSlice()})
 		require.NoError(t, err)
 		f := &flowpb.Flow{}
 		err = parser.Decode(data, f)
@@ -643,6 +742,20 @@ func TestDecodeTrafficDirection(t *testing.T) {
 		ObsPoint: monitorAPI.TraceToLxc,
 	}
 	f = parseFlow(tn, localIP, remoteIP)
+	assert.Equal(t, flowpb.TrafficDirection_EGRESS, f.GetTrafficDirection())
+	assert.Equal(t, uint32(localEP), f.GetSource().GetID())
+
+	// TO_NETWORK Egress (SNAT)
+	tnv1 := monitor.TraceNotifyV1{
+		TraceNotifyV0: monitor.TraceNotifyV0{
+			Type:     byte(monitorAPI.MessageTypeTrace),
+			Source:   hostEP,
+			ObsPoint: monitorAPI.TraceToNetwork,
+			Version:  monitor.TraceNotifyVersion1,
+		},
+		OrigIP: types.IPv6{1, 2, 3, 4}, // localIP
+	}
+	f = parseFlow(tnv1, netip.MustParseAddr("10.11.12.13"), remoteIP)
 	assert.Equal(t, flowpb.TrafficDirection_EGRESS, f.GetTrafficDirection())
 	assert.Equal(t, uint32(localEP), f.GetSource().GetID())
 
@@ -700,6 +813,17 @@ func TestDecodeTrafficDirection(t *testing.T) {
 	assert.Equal(t, flowpb.TrafficDirection_TRAFFIC_DIRECTION_UNKNOWN, f.GetTrafficDirection())
 	assert.Equal(t, uint32(localEP), f.GetSource().GetID())
 
+	// TRACE_TO_STACK Encrypt Overlay
+	tn = monitor.TraceNotifyV0{
+		Type:     byte(monitorAPI.MessageTypeTrace),
+		Source:   hostEP,
+		ObsPoint: monitorAPI.TraceToStack,
+		Reason:   monitor.TraceReasonEncryptOverlay,
+	}
+	f = parseFlow(tn, localIP, remoteIP)
+	assert.Equal(t, flowpb.TrafficDirection_EGRESS, f.GetTrafficDirection())
+	assert.Equal(t, uint32(localEP), f.GetSource().GetID())
+
 	// TRACE_TO_STACK SRV6 decap Ingress
 	tn = monitor.TraceNotifyV0{
 		Type:     byte(monitorAPI.MessageTypeTrace),
@@ -733,9 +857,9 @@ func TestDecodeTrafficDirection(t *testing.T) {
 	assert.Equal(t, flowpb.TrafficDirection_EGRESS, f.GetTrafficDirection())
 	assert.Equal(t, uint32(localEP), f.GetSource().GetID())
 
-	ep, ok := endpointGetter.GetEndpointInfo(netip.MustParseAddr(localIP))
+	ep, ok := endpointGetter.GetEndpointInfo(localIP)
 	assert.Equal(t, true, ok)
-	lbls, rev, ok := ep.GetRealizedPolicyRuleLabelsForKey(policy.Key{
+	lbls, rev, ok := ep.GetRealizedPolicyRuleLabelsForKey(policyTypes.Key{
 		Identity:         f.GetDestination().GetIdentity(),
 		TrafficDirection: directionFromProto(f.GetTrafficDirection()).Uint8(),
 	})
@@ -990,6 +1114,7 @@ func TestTraceNotifyOriginalIP(t *testing.T) {
 	err = parser.Decode(data, f)
 	require.NoError(t, err)
 	assert.Equal(t, f.IP.Source, "10.0.0.2")
+	assert.Empty(t, f.IP.SourceXlated)
 
 	v1 := monitor.TraceNotifyV1{
 		TraceNotifyV0: monitor.TraceNotifyV0{
@@ -1003,6 +1128,21 @@ func TestTraceNotifyOriginalIP(t *testing.T) {
 	err = parser.Decode(data, f)
 	require.NoError(t, err)
 	assert.Equal(t, f.IP.Source, "1.1.1.1")
+	assert.Equal(t, f.IP.SourceXlated, "10.0.0.2")
+
+	v1 = monitor.TraceNotifyV1{
+		TraceNotifyV0: monitor.TraceNotifyV0{
+			Type:    byte(monitorAPI.MessageTypeTrace),
+			Version: monitor.TraceNotifyVersion1,
+		},
+		OrigIP: [16]byte{10, 0, 0, 2},
+	}
+	data, err = testutils.CreateL3L4Payload(v1, &eth, &ip, &layers.TCP{})
+	require.NoError(t, err)
+	err = parser.Decode(data, f)
+	require.NoError(t, err)
+	assert.Equal(t, f.IP.Source, "10.0.0.2")
+	assert.Empty(t, f.IP.SourceXlated)
 }
 
 func TestICMP(t *testing.T) {
@@ -1073,7 +1213,7 @@ func TestTraceNotifyLocalEndpoint(t *testing.T) {
 		Labels:       []string{"a", "b", "c"},
 	}
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			return ep, true
 		},
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/cilium/workerpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/controller"
@@ -35,14 +37,12 @@ import (
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/rand"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 var (
-	randGen                    = rand.NewSafeRand(time.Now().UnixNano())
 	baseBackgroundSyncInterval = time.Minute
 	defaultNodeUpdateInterval  = 10 * time.Second
 
@@ -69,7 +69,7 @@ type nodeEntry struct {
 
 // IPCache is the set of interactions the node manager performs with the ipcache
 type IPCache interface {
-	GetMetadataByPrefix(prefix netip.Prefix) ipcache.PrefixInfo
+	GetMetadataSourceByPrefix(prefix netip.Prefix) source.Source
 	UpsertMetadata(prefix netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID, aux ...ipcache.IPMetadata)
 	OverrideIdentity(prefix netip.Prefix, identityLabels labels.Labels, src source.Source, resource ipcacheTypes.ResourceID)
 	RemoveMetadata(prefix netip.Prefix, resource ipcacheTypes.ResourceID, aux ...ipcache.IPMetadata)
@@ -345,54 +345,75 @@ func (m *manager) backgroundSync(ctx context.Context) error {
 	defer syncTimerDone()
 	for {
 		syncInterval := m.backgroundSyncInterval()
-		log.WithField("syncInterval", syncInterval.String()).Debug("Performing regular background work")
+		startWaiting := syncTimer.After(syncInterval)
+		log.WithField("syncInterval", syncInterval.String()).Debug("Starting new iteration of background sync")
+		err := m.singleBackgroundLoop(ctx, syncInterval)
+		log.WithField("syncInterval", syncInterval.String()).Debug("Finished iteration of background sync")
 
-		var errs error
-		// get a copy of the node identities to avoid locking the entire manager
-		// throughout the process of running the datapath validation.
-		nodes := m.GetNodeIdentities()
-		for _, nodeIdentity := range nodes {
-			// Retrieve latest node information in case any event
-			// changed the node since the call to GetNodes()
-			m.mutex.RLock()
-			entry, ok := m.nodes[nodeIdentity]
-			if !ok {
-				m.mutex.RUnlock()
-				continue
-			}
-			m.mutex.RUnlock()
-
-			entry.mutex.Lock()
-			{
-				m.Iter(func(nh datapath.NodeHandler) {
-					if err := nh.NodeValidateImplementation(entry.node); err != nil {
-						log.WithFields(logrus.Fields{
-							"handler": nh.Name(),
-							"node":    entry.node.Name,
-						}).WithError(err).
-							Error("Failed to apply node handler during background sync. Cilium may have degraded functionality. See error message for details.")
-						errs = errors.Join(errs, fmt.Errorf("failed while handling %s on node %s: %w", nh.Name(), entry.node.Name, err))
-					}
-				})
-			}
-			entry.mutex.Unlock()
-
-			m.metrics.DatapathValidations.Inc()
+		select {
+		case <-ctx.Done():
+			return nil
+		// This handles cases when we didn't fetch nodes yet (e.g. on bootstrap)
+		// but also case when we have 1 node, in which case rate.Limiter doesn't
+		// throttle anything.
+		case <-startWaiting:
 		}
 
 		hr := m.health.NewScope("background-sync")
-		if errs != nil {
-			hr.Degraded("Failed to apply node validation", errs)
+		if err != nil {
+			hr.Degraded("Failed to apply node validation", err)
 		} else {
 			hr.OK("Node validation successful")
+		}
+	}
+}
+
+func (m *manager) singleBackgroundLoop(ctx context.Context, expectedLoopTime time.Duration) error {
+	var errs error
+	// get a copy of the node identities to avoid locking the entire manager
+	// throughout the process of running the datapath validation.
+	nodes := m.GetNodeIdentities()
+	limiter := rate.NewLimiter(
+		rate.Limit(float64(len(nodes))/float64(expectedLoopTime.Seconds())),
+		1, // One token in bucket to amortize for latency of the operation
+	)
+	for _, nodeIdentity := range nodes {
+		if err := limiter.Wait(ctx); err != nil {
+			log.WithError(err).Debug("Error while rate limiting backgroundSync updates")
 		}
 
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-syncTimer.After(syncInterval):
+		default:
 		}
+		// Retrieve latest node information in case any event
+		// changed the node since the call to GetNodes()
+		m.mutex.RLock()
+		entry, ok := m.nodes[nodeIdentity]
+		if !ok {
+			m.mutex.RUnlock()
+			continue
+		}
+		entry.mutex.Lock()
+		m.mutex.RUnlock()
+		{
+			m.Iter(func(nh datapath.NodeHandler) {
+				if err := nh.NodeValidateImplementation(entry.node); err != nil {
+					log.WithFields(logrus.Fields{
+						"handler": nh.Name(),
+						"node":    entry.node.Name,
+					}).WithError(err).
+						Error("Failed to apply node handler during background sync. Cilium may have degraded functionality. See error message for details.")
+					errs = errors.Join(errs, fmt.Errorf("failed while handling %s on node %s: %w", nh.Name(), entry.node.Name, err))
+				}
+			})
+		}
+		entry.mutex.Unlock()
+
+		m.metrics.DatapathValidations.Inc()
 	}
+	return errs
 }
 
 func (m *manager) nodeAddressHasTunnelIP(address nodeTypes.Address) bool {
@@ -527,7 +548,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		// * CiliumInternal IP addresses that match configured local router IP.
 		//   In that case, we still want to inform subscribers about a new node
 		//   even when IP addresses may seem repeated across the nodes.
-		existing := m.ipcache.GetMetadataByPrefix(prefix).Source()
+		existing := m.ipcache.GetMetadataSourceByPrefix(prefix)
 		overwrite := source.AllowOverwrite(existing, n.Source)
 		if !overwrite && existing != source.KubeAPIServer &&
 			!(address.Type == addressing.NodeCiliumInternalIP && m.conf.IsLocalRouterIP(address.ToString())) {
@@ -570,7 +591,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		if !healthIP.IsValid() {
 			continue
 		}
-		if !source.AllowOverwrite(m.ipcache.GetMetadataByPrefix(healthIP).Source(), n.Source) {
+		if !source.AllowOverwrite(m.ipcache.GetMetadataSourceByPrefix(healthIP), n.Source) {
 			dpUpdate = false
 		}
 
@@ -586,7 +607,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		if !ingressIP.IsValid() {
 			continue
 		}
-		if !source.AllowOverwrite(m.ipcache.GetMetadataByPrefix(ingressIP).Source(), n.Source) {
+		if !source.AllowOverwrite(m.ipcache.GetMetadataSourceByPrefix(ingressIP), n.Source) {
 			dpUpdate = false
 		}
 
@@ -930,7 +951,7 @@ func (m *manager) StartNeighborRefresh(nh datapath.NodeNeighbors) {
 						// To avoid flooding network with arping requests
 						// at the same time, spread them over the
 						// [0; ARPPingRefreshPeriod/2) period.
-						n := randGen.Int63n(int64(m.conf.ARPPingRefreshPeriod / 2))
+						n := rand.Int64N(int64(m.conf.ARPPingRefreshPeriod / 2))
 						time.Sleep(time.Duration(n))
 						m.Enqueue(e, false)
 					}(ctx, &entryNode)

@@ -4,22 +4,25 @@ description: Creates K8s cluster inside LVH VM, and then exposes K8s cluster to 
 inputs:
   kernel:
     required: true
-    type: string
+    description: 'Linux kernel version'
   kind-params:
     required: true
-    type: string
+    description: 'Kind parameters'
   kind-image:
     required: true
-    type: string
+    description: 'Kind image'
+  kind-config:
+    required: false
+    description: 'Optional Kind configuration'
   test-name:
     required: true
-    type: string
+    description: 'Test name'
 
 runs:
   using: composite
   steps:
     - name: Provision LVH VMs
-      uses: cilium/little-vm-helper@a4311c6d054de3008bdf9195b0fabf6ee60d8bdd # v0.0.17
+      uses: cilium/little-vm-helper@3c748d6fc9d6c44a433de85a66f70e8f7043be04 # v0.0.18
       with:
         test-name: ${{ inputs.test-name }}
         image-version: ${{ inputs.kernel }}
@@ -28,19 +31,23 @@ runs:
         mem: 12G
         install-dependencies: 'true'
         port-forward: '6443:6443'
-        ssh-startup-wait-retries: 600
+        ssh-connect-wait-retries: 600
         cmd: |
           git config --global --add safe.directory /host
 
     - name: Create K8s cluster
-      uses: cilium/little-vm-helper@a4311c6d054de3008bdf9195b0fabf6ee60d8bdd # v0.0.17
+      uses: cilium/little-vm-helper@3c748d6fc9d6c44a433de85a66f70e8f7043be04 # v0.0.18
       with:
         provision: 'false'
         cmd: |
           cd /host
-
           export IMAGE=${{ inputs.kind-image }}
-          ./contrib/scripts/kind.sh ${{ inputs.kind-params }} 0.0.0.0 6443
+
+          if [ "${{ inputs.kind-config }}" != "" ]; then
+            kind create cluster --config ${{ inputs.kind-config }}
+          else
+            ./contrib/scripts/kind.sh ${{ inputs.kind-params }} 0.0.0.0 6443
+          fi
 
     - name: Copy kubeconfig
       shell: bash

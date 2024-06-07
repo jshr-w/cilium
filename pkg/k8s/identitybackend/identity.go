@@ -362,18 +362,18 @@ func (c *crdBackend) ListAndWatch(ctx context.Context, handler allocator.CacheMu
 			AddFunc: func(obj interface{}) {
 				if identity, ok := obj.(*v2.CiliumIdentity); ok {
 					if id, err := strconv.ParseUint(identity.Name, 10, 64); err == nil {
-						handler.OnAdd(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
+						handler.OnUpsert(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
 					}
 				}
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
-				if oldIdentity, ok := newObj.(*v2.CiliumIdentity); ok {
+				if oldIdentity, ok := oldObj.(*v2.CiliumIdentity); ok {
 					if newIdentity, ok := newObj.(*v2.CiliumIdentity); ok {
 						if oldIdentity.DeepEqual(newIdentity) {
 							return
 						}
 						if id, err := strconv.ParseUint(newIdentity.Name, 10, 64); err == nil {
-							handler.OnModify(idpool.ID(id), c.KeyFunc(newIdentity.SecurityLabels))
+							handler.OnUpsert(idpool.ID(id), c.KeyFunc(newIdentity.SecurityLabels))
 						}
 					}
 				}

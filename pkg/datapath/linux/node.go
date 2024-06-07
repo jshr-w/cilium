@@ -27,7 +27,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
-	"github.com/cilium/cilium/pkg/datapath/tables"
 	dpTunnel "github.com/cilium/cilium/pkg/datapath/tunnel"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -37,12 +36,10 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
-	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/manager"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/statedb"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -62,7 +59,6 @@ type linuxNodeHandler struct {
 	mutex                lock.RWMutex
 	isInitialized        bool
 	nodeConfig           datapath.LocalNodeConfiguration
-	nodeAddressing       datapath.NodeAddressing
 	datapathConfig       DatapathConfiguration
 	nodes                map[nodeTypes.Identity]*nodeTypes.Node
 	enableNeighDiscovery bool
@@ -72,7 +68,7 @@ type linuxNodeHandler struct {
 	neighNextHopByNode6  map[nodeTypes.Identity]map[string]string // val = (key=link, value=string(net.IP))
 	ipsecUpdateNeeded    map[nodeTypes.Identity]bool
 	// All three mappings below hold both IPv4 and IPv6 entries.
-	neighNextHopRefCount   counter.StringCounter
+	neighNextHopRefCount   counter.Counter[string]
 	neighByNextHop         map[string]*netlink.Neigh // key = string(net.IP)
 	neighLastPingByNextHop map[string]time.Time      // key = string(net.IP)
 
@@ -90,9 +86,6 @@ type linuxNodeHandler struct {
 	prefixClusterMutatorFn func(node *nodeTypes.Node) []cmtypes.PrefixClusterOpts
 	enableEncapsulation    func(node *nodeTypes.Node) bool
 	nodeNeighborQueue      datapath.NodeNeighborEnqueuer
-
-	db      *statedb.DB
-	devices statedb.Table[*tables.Device]
 }
 
 var (
@@ -105,19 +98,15 @@ var (
 // implement the implications in the Linux datapath
 func NewNodeHandler(
 	tunnelConfig dpTunnel.Config,
-	nodeAddressing datapath.NodeAddressing,
 	nodeMap nodemap.MapV2,
-	mtu mtu.MTU,
 	nodeManager manager.NodeManager,
-	db *statedb.DB,
-	devices statedb.Table[*tables.Device],
 ) (datapath.NodeHandler, datapath.NodeIDHandler, datapath.NodeNeighbors) {
 	datapathConfig := DatapathConfiguration{
 		HostDevice:   defaults.HostDevice,
 		TunnelDevice: tunnelConfig.DeviceName(),
 	}
 
-	handler := newNodeHandler(datapathConfig, nodeAddressing, nodeMap, mtu, nodeManager, db, devices)
+	handler := newNodeHandler(datapathConfig, nodeMap, nodeManager)
 	return handler, handler, handler
 }
 
@@ -125,23 +114,16 @@ func NewNodeHandler(
 // implement the implications in the Linux datapath
 func newNodeHandler(
 	datapathConfig DatapathConfiguration,
-	nodeAddressing datapath.NodeAddressing,
 	nodeMap nodemap.MapV2,
-	mtu datapath.MTUConfiguration,
 	nbq datapath.NodeNeighborEnqueuer,
-	db *statedb.DB,
-	devices statedb.Table[*tables.Device],
 ) *linuxNodeHandler {
 	return &linuxNodeHandler{
-		db:                     db,
-		devices:                devices,
-		nodeAddressing:         nodeAddressing,
 		datapathConfig:         datapathConfig,
-		nodeConfig:             datapath.LocalNodeConfiguration{MtuConfig: mtu},
+		nodeConfig:             datapath.LocalNodeConfiguration{},
 		nodes:                  map[nodeTypes.Identity]*nodeTypes.Node{},
 		neighNextHopByNode4:    map[nodeTypes.Identity]map[string]string{},
 		neighNextHopByNode6:    map[nodeTypes.Identity]map[string]string{},
-		neighNextHopRefCount:   counter.StringCounter{},
+		neighNextHopRefCount:   counter.Counter[string]{},
 		neighByNextHop:         map[string]*netlink.Neigh{},
 		neighLastPingByNextHop: map[string]time.Time{},
 		nodeMap:                nodeMap,
@@ -444,26 +426,18 @@ func (n *linuxNodeHandler) createNodeRouteSpec(prefix *cidr.CIDR, isLocalNode bo
 		mtu     int
 	)
 	if prefix.IP.To4() != nil {
-		if n.nodeAddressing.IPv4() == nil {
-			return route.Route{}, fmt.Errorf("IPv4 addressing unavailable")
-		}
-
-		if n.nodeAddressing.IPv4().Router() == nil {
+		if n.nodeConfig.CiliumInternalIPv4 == nil {
 			return route.Route{}, fmt.Errorf("IPv4 router address unavailable")
 		}
 
-		local = n.nodeAddressing.IPv4().Router()
+		local = n.nodeConfig.CiliumInternalIPv4
 		nexthop = &local
 	} else {
-		if n.nodeAddressing.IPv6() == nil {
-			return route.Route{}, fmt.Errorf("IPv6 addressing unavailable")
-		}
-
-		if n.nodeAddressing.IPv6().Router() == nil {
+		if n.nodeConfig.CiliumInternalIPv6 == nil {
 			return route.Route{}, fmt.Errorf("IPv6 router address unavailable")
 		}
 
-		if n.nodeAddressing.IPv6().PrimaryExternal() == nil {
+		if n.nodeConfig.NodeIPv6 == nil {
 			return route.Route{}, fmt.Errorf("external IPv6 address unavailable")
 		}
 
@@ -471,11 +445,11 @@ func (n *linuxNodeHandler) createNodeRouteSpec(prefix *cidr.CIDR, isLocalNode bo
 		// with "Error: Gateway can not be a local address". Instead, we have to remove "via"
 		// as "ip r a $cidr dev cilium_host" to make it work.
 		nexthop = nil
-		local = n.nodeAddressing.IPv6().Router()
+		local = n.nodeConfig.CiliumInternalIPv6
 	}
 
 	if !isLocalNode {
-		mtu = n.nodeConfig.MtuConfig.GetRouteMTU()
+		mtu = n.nodeConfig.RouteMTU
 	}
 
 	// The default routing table accounts for encryption overhead for encrypt-node traffic
@@ -1222,8 +1196,7 @@ func (n *linuxNodeHandler) NodeConfigurationChanged(newConfig datapath.LocalNode
 				return fmt.Errorf("direct routing device is required, but not defined")
 			}
 
-			nativeDevices, _ := tables.SelectedDevices(n.devices, n.db.ReadTxn())
-			devices := tables.DeviceNames(nativeDevices)
+			devices := n.nodeConfig.DeviceNames()
 
 			targetDevices := make([]string, 0, len(devices)+1)
 			targetDevices = append(targetDevices, option.Config.DirectRoutingDevice)
@@ -1293,8 +1266,14 @@ func (n *linuxNodeHandler) NodeConfigurationChanged(newConfig datapath.LocalNode
 		if err := n.removeEncryptRules(); err != nil {
 			log.WithError(err).Warning("Cannot cleanup previous encryption rule state.")
 		}
-		if err := ipsec.DeleteXfrm(); err != nil {
+		if err := ipsec.DeleteXFRM(); err != nil {
 			return fmt.Errorf("failed to delete xfrm policies on node configuration changed: %w", err)
+		}
+	}
+
+	if !newConfig.EnableIPSecEncryptedOverlay {
+		if err := ipsec.DeleteXFRMWithReqID(ipsec.EncryptedOverlayReqID); err != nil {
+			return fmt.Errorf("failed to delete encrypt overlay xfrm policies on node configuration change: %w", err)
 		}
 	}
 

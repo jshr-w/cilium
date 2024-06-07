@@ -791,6 +791,7 @@ type DNSZombieMappings struct {
 	lock.Mutex
 	deletes        map[netip.Addr]*DNSZombieMapping
 	lastCTGCUpdate time.Time
+	nextCTGCUpdate time.Time // estimated
 	// ctGCRevision is a serial number tracking the number of conntrack
 	// garbage collection runs. It is used to ensure that entries
 	// are not reaped until CT GC has run at least twice.
@@ -1059,9 +1060,10 @@ func (zombies *DNSZombieMappings) MarkAlive(now time.Time, ip netip.Addr) {
 // When 'ctGCStart' is later than an alive timestamp, set with MarkAlive, the zombie is
 // no longer alive. Thus, this call acts as a gating function for what data is
 // returned by GC.
-func (zombies *DNSZombieMappings) SetCTGCTime(ctGCStart time.Time) {
+func (zombies *DNSZombieMappings) SetCTGCTime(ctGCStart, estNext time.Time) {
 	zombies.Lock()
 	zombies.lastCTGCUpdate = ctGCStart
+	zombies.nextCTGCUpdate = estNext
 	zombies.ctGCRevision++
 	zombies.Unlock()
 }
@@ -1151,12 +1153,13 @@ func (zombies *DNSZombieMappings) ForceExpireByNameIP(expireLookupsBefore time.T
 	return nil
 }
 
-// CIDRMatcherFunc is a function passed to (*DNSZombieMappings).DumpAlive,
+// PrefixMatcherFunc is a function passed to (*DNSZombieMappings).DumpAlive,
 // called on each zombie to determine whether it should be returned.
-type CIDRMatcherFunc func(ip net.IP) bool
+type PrefixMatcherFunc func(ip netip.Addr) bool
+type NameMatcherFunc func(name string) bool
 
-// DumpAlive returns copies of still-alive zombies matching cidrMatcher.
-func (zombies *DNSZombieMappings) DumpAlive(cidrMatcher CIDRMatcherFunc) (alive []*DNSZombieMapping) {
+// DumpAlive returns copies of still-alive zombies matching prefixMatcher.
+func (zombies *DNSZombieMappings) DumpAlive(prefixMatcher PrefixMatcherFunc) (alive []*DNSZombieMapping) {
 	zombies.Lock()
 	defer zombies.Unlock()
 
@@ -1166,7 +1169,7 @@ func (zombies *DNSZombieMappings) DumpAlive(cidrMatcher CIDRMatcherFunc) (alive 
 			continue
 		}
 		// only proceed if zombie is alive and the IP matches the CIDR selector
-		if cidrMatcher != nil && !cidrMatcher(zombie.IP.AsSlice()) {
+		if prefixMatcher != nil && !prefixMatcher(zombie.IP) {
 			continue
 		}
 

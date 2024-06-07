@@ -24,6 +24,19 @@ import (
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
+// initCiliumEndpointOrSlices intializes the ciliumEndpoints or ciliumEndpointSlice
+func (k *K8sWatcher) initCiliumEndpointOrSlices(ctx context.Context, asyncControllers *sync.WaitGroup) {
+	// If CiliumEndpointSlice feature is enabled, Cilium-agent watches CiliumEndpointSlice
+	// objects instead of CiliumEndpoints. Hence, skip watching CiliumEndpoints if CiliumEndpointSlice
+	// feature is enabled.
+	asyncControllers.Add(1)
+	if option.Config.EnableCiliumEndpointSlice {
+		go k.ciliumEndpointSliceInit(ctx, asyncControllers)
+	} else {
+		go k.ciliumEndpointsInit(ctx, asyncControllers)
+	}
+}
+
 func (k *K8sWatcher) ciliumEndpointsInit(ctx context.Context, asyncControllers *sync.WaitGroup) {
 	// CiliumEndpoint objects are used for ipcache discovery until the
 	// key-value store is connected
@@ -34,7 +47,7 @@ func (k *K8sWatcher) ciliumEndpointsInit(ctx context.Context, asyncControllers *
 		var synced atomic.Bool
 		stop := make(chan struct{})
 
-		k.blockWaitGroupToSyncResources(
+		k.k8sResourceSynced.BlockWaitGroupToSyncResources(
 			stop,
 			nil,
 			func() bool { return synced.Load() },
@@ -76,7 +89,7 @@ func (k *K8sWatcher) ciliumEndpointsInit(ctx context.Context, asyncControllers *
 		case <-kvstore.Connected():
 			log.Info("Connected to key-value store, stopping CiliumEndpoint watcher")
 			cancel()
-			k.cancelWaitGroupToSyncResources(apiGroup)
+			k.k8sResourceSynced.CancelWaitGroupToSyncResources(apiGroup)
 			k.k8sAPIGroups.RemoveAPI(apiGroup)
 			<-stop
 		case <-ctx.Done():

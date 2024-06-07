@@ -8,12 +8,13 @@ import (
 	"sort"
 	"testing"
 
-	. "github.com/cilium/checkmate"
+	"github.com/cilium/statedb"
+	"github.com/stretchr/testify/require"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
-	"github.com/cilium/cilium/pkg/checker"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
@@ -27,15 +28,6 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
-
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type K8sWatcherSuite struct{}
-
-var _ = Suite(&K8sWatcherSuite{})
 
 var emptyResources = agentK8s.Resources{}
 
@@ -73,17 +65,6 @@ func (f *fakePolicyManager) PolicyDelete(labels labels.LabelArray, opts *policy.
 	panic("OnPolicyDelete(labels.LabelArray, *policy.DeleteOptions) (uint64, error) was called and is not set!")
 }
 
-type fakePolicyRepository struct {
-	OnGetSelectorCache func() *policy.SelectorCache
-}
-
-func (f *fakePolicyRepository) GetSelectorCache() *policy.SelectorCache {
-	if f.OnGetSelectorCache != nil {
-		return f.OnGetSelectorCache()
-	}
-	panic("OnGetSelectorCache() (*policy.SelectorCache) was called and is not set!")
-}
-
 type fakeSvcManager struct {
 	OnDeleteService func(frontend loadbalancer.L3n4Addr) (bool, error)
 	OnUpsertService func(*loadbalancer.SVC) (bool, loadbalancer.ID, error)
@@ -107,7 +88,23 @@ func (f *fakeSvcManager) UpsertService(p *loadbalancer.SVC) (bool, loadbalancer.
 	panic("OnUpsertService() was called and is not set!")
 }
 
-func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
+func newDB(t *testing.T) (*statedb.DB, statedb.Table[datapathTables.NodeAddress]) {
+	db := statedb.New()
+	nodeAddrs, err := datapathTables.NewNodeAddressTable()
+	require.NoError(t, err)
+	err = db.RegisterTable(nodeAddrs)
+	require.NoError(t, err)
+
+	txn := db.WriteTxn(nodeAddrs)
+	for _, addr := range datapathTables.TestAddresses {
+		nodeAddrs.Insert(txn, addr)
+	}
+	txn.Commit()
+
+	return db, nodeAddrs
+}
+
+func Test_addK8sSVCs_ClusterIP(t *testing.T) {
 	k8sSvc := &slim_corev1.Service{
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name:      "foo",
@@ -345,7 +342,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
 
 	svcUpsertManagerCalls, svcDeleteManagerCalls := 0, 0
 
@@ -380,7 +376,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -388,17 +385,17 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -415,15 +412,15 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
 
 	swg.Stop()
 	swg.Wait()
-	c.Assert(svcUpsertManagerCalls, Equals, len(upsert1stWanted)+len(upsert2ndWanted))
-	c.Assert(svcDeleteManagerCalls, Equals, len(del1stWanted))
+	require.Equal(t, len(upsert1stWanted)+len(upsert2ndWanted), svcUpsertManagerCalls)
+	require.Equal(t, len(del1stWanted), svcDeleteManagerCalls)
 
-	c.Assert(upsert1st, checker.DeepEquals, upsert1stWanted)
-	c.Assert(upsert2nd, checker.DeepEquals, upsert2ndWanted)
-	c.Assert(del1st, checker.DeepEquals, del1stWanted)
+	require.EqualValues(t, upsert1stWanted, upsert1st)
+	require.EqualValues(t, upsert2ndWanted, upsert2nd)
+	require.EqualValues(t, del1stWanted, del1st)
 }
 
-func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
+func TestChangeSVCPort(t *testing.T) {
 	k8sSvc := &slim_corev1.Service{
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name:      "foo",
@@ -512,7 +509,6 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
 
 	svcUpsertManagerCalls := 0
 
@@ -531,7 +527,8 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -539,17 +536,17 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -560,11 +557,11 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
 
 	swg.Stop()
 	swg.Wait()
-	c.Assert(svcUpsertManagerCalls, Equals, 2) // Add and Update events
-	c.Assert(upserts, checker.DeepEquals, upsertsWanted)
+	require.Equal(t, 2, svcUpsertManagerCalls) // Add and Update events
+	require.EqualValues(t, upsertsWanted, upserts)
 }
 
-func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
+func Test_addK8sSVCs_NodePort(t *testing.T) {
 	enableNodePortBak := option.Config.EnableNodePort
 	option.Config.EnableNodePort = true
 	defer func() {
@@ -976,8 +973,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
-
 	svcUpsertManagerCalls, svcDeleteManagerCalls := 0, 0
 
 	svcManager := &fakeSvcManager{
@@ -1011,7 +1006,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -1019,17 +1015,17 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -1046,15 +1042,15 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
 
 	swg.Stop()
 	swg.Wait()
-	c.Assert(svcUpsertManagerCalls, Equals, len(upsert1stWanted)+len(upsert2ndWanted))
-	c.Assert(svcDeleteManagerCalls, Equals, len(del1stWanted))
+	require.Equal(t, len(upsert1stWanted)+len(upsert2ndWanted), svcUpsertManagerCalls)
+	require.Equal(t, len(del1stWanted), svcDeleteManagerCalls)
 
-	c.Assert(upsert1st, checker.DeepEquals, upsert1stWanted)
-	c.Assert(upsert2nd, checker.DeepEquals, upsert2ndWanted)
-	c.Assert(del1st, checker.DeepEquals, del1stWanted)
+	require.EqualValues(t, upsert1stWanted, upsert1st)
+	require.EqualValues(t, upsert2ndWanted, upsert2nd)
+	require.EqualValues(t, del1stWanted, del1st)
 }
 
-func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
+func Test_addK8sSVCs_GH9576_1(t *testing.T) {
 	// Adding service without any endpoints and later on modifying the service,
 	// cilium should:
 	// 1) delete the non existing services from the datapath.
@@ -1288,7 +1284,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
 
 	svcUpsertManagerCalls, svcDeleteManagerCalls := 0, 0
 	wantSvcUpsertManagerCalls := len(upsert1stWanted) + len(upsert2ndWanted)
@@ -1325,7 +1320,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -1333,17 +1329,17 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -1355,15 +1351,15 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
 
 	swg.Stop()
 	swg.Wait()
-	c.Assert(svcUpsertManagerCalls, Equals, wantSvcUpsertManagerCalls)
-	c.Assert(svcDeleteManagerCalls, Equals, wantSvcDeleteManagerCalls)
+	require.Equal(t, wantSvcUpsertManagerCalls, svcUpsertManagerCalls)
+	require.Equal(t, wantSvcDeleteManagerCalls, svcDeleteManagerCalls)
 
-	c.Assert(upsert1st, checker.DeepEquals, upsert1stWanted)
-	c.Assert(upsert2nd, checker.DeepEquals, upsert2ndWanted)
-	c.Assert(del1st, checker.DeepEquals, del1stWanted)
+	require.EqualValues(t, upsert1stWanted, upsert1st)
+	require.EqualValues(t, upsert2ndWanted, upsert2nd)
+	require.EqualValues(t, del1stWanted, del1st)
 }
 
-func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
+func Test_addK8sSVCs_GH9576_2(t *testing.T) {
 	// Adding service without any endpoints and later on modifying the service,
 	// cilium should:
 	// 1) delete the non existing endpoints from the datapath, i.e., updating
@@ -1595,7 +1591,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
 
 	svcUpsertManagerCalls, svcDeleteManagerCalls := 0, 0
 	wantSvcUpsertManagerCalls := len(upsert1stWanted) + len(upsert2ndWanted)
@@ -1632,7 +1627,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -1640,17 +1636,17 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -1662,15 +1658,15 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
 	swg.Stop()
 	swg.Wait()
 
-	c.Assert(svcUpsertManagerCalls, Equals, wantSvcUpsertManagerCalls)
-	c.Assert(svcDeleteManagerCalls, Equals, wantSvcDeleteManagerCalls)
+	require.Equal(t, wantSvcUpsertManagerCalls, svcUpsertManagerCalls)
+	require.Equal(t, wantSvcDeleteManagerCalls, svcDeleteManagerCalls)
 
-	c.Assert(upsert1st, checker.DeepEquals, upsert1stWanted)
-	c.Assert(upsert2nd, checker.DeepEquals, upsert2ndWanted)
-	c.Assert(del1st, checker.DeepEquals, del1stWanted)
+	require.EqualValues(t, upsert1stWanted, upsert1st)
+	require.EqualValues(t, upsert2ndWanted, upsert2nd)
+	require.EqualValues(t, del1stWanted, del1st)
 }
 
-func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
+func Test_addK8sSVCs_ExternalIPs(t *testing.T) {
 	enableNodePortBak := option.Config.EnableNodePort
 	option.Config.EnableNodePort = true
 	defer func() {
@@ -2504,7 +2500,6 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 		OnTriggerPolicyUpdates: func(force bool, reason string) {
 		},
 	}
-	policyRepository := &fakePolicyRepository{}
 
 	svcUpsertManagerCalls, svcDeleteManagerCalls := 0, 0
 
@@ -2553,7 +2548,8 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 		},
 	}
 
-	dp := fakeTypes.NewDatapath()
+	db, nodeAddrs := newDB(t)
+
 	w := NewK8sWatcher(
 		nil,
 		nil,
@@ -2561,17 +2557,17 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 		nil,
 		nil,
 		policyManager,
-		policyRepository,
 		svcManager,
-		dp,
 		nil,
 		nil,
 		&fakeWatcherConfiguration{},
 		testipcache.NewMockIPCache(),
 		nil,
 		emptyResources,
-		k8s.NewServiceCache(dp.LocalNodeAddressing()),
+		k8s.NewServiceCache(db, nodeAddrs),
 		nil,
+		db,
+		nodeAddrs,
 	)
 	go w.k8sServiceHandler()
 	swg := lock.NewStoppableWaitGroup()
@@ -2590,24 +2586,22 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
 
 	swg.Stop()
 	swg.Wait()
-	c.Assert(svcUpsertManagerCalls, Equals, len(upsert1stWanted)+len(upsert2ndWanted)+len(upsert3rdWanted))
-	c.Assert(svcDeleteManagerCalls, Equals, len(del1stWanted)+len(del2ndWanted))
+	require.Equal(t, len(upsert1stWanted)+len(upsert2ndWanted)+len(upsert3rdWanted), svcUpsertManagerCalls)
+	require.Equal(t, len(del1stWanted)+len(del2ndWanted), svcDeleteManagerCalls)
 
-	c.Assert(upsert1st, checker.DeepEquals, upsert1stWanted)
-	c.Assert(upsert2nd, checker.DeepEquals, upsert2ndWanted)
-	c.Assert(upsert3rd, checker.DeepEquals, upsert3rdWanted)
-	c.Assert(del1st, checker.DeepEquals, del1stWanted)
-	c.Assert(del2nd, checker.DeepEquals, del2ndWanted)
+	require.EqualValues(t, upsert1stWanted, upsert1st)
+	require.EqualValues(t, upsert2ndWanted, upsert2nd)
+	require.EqualValues(t, upsert3rdWanted, upsert3rd)
+	require.EqualValues(t, del1stWanted, del1st)
+	require.EqualValues(t, del2ndWanted, del2nd)
 }
 
-func (s *K8sWatcherSuite) Test_No_Resources_InitK8sSubsystem(c *C) {
+func Test_No_Resources_InitK8sSubsystem(t *testing.T) {
 	fakeClientSet, _ := client.NewFakeClientset()
 
 	w := NewK8sWatcher(
 		fakeClientSet,
 		&synced.Resources{},
-		nil,
-		nil,
 		nil,
 		nil,
 		nil,
@@ -2621,20 +2615,26 @@ func (s *K8sWatcherSuite) Test_No_Resources_InitK8sSubsystem(c *C) {
 		emptyResources,
 		nil,
 		nil,
+		nil,
+		nil,
 	)
 
+	w.resourceGroupsFn = func(cfg WatcherConfiguration) (resourceGroups []string, waitForCachesOnly []string) {
+		return []string{}, []string{}
+	}
+
 	// ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	deadline, _ := c.Deadline()
+	deadline, _ := t.Deadline()
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
 	cachesSynced := make(chan struct{})
-	w.InitK8sSubsystem(ctx, []string{}, []string{}, cachesSynced)
+	w.InitK8sSubsystem(ctx, cachesSynced)
 	// Expect channel to be closed.
 	select {
 	case <-ctx.Done():
-		c.Fail()
+		t.Fail()
 	case _, ok := <-cachesSynced:
-		c.Assert(ok, Equals, false)
+		require.False(t, ok)
 	}
 }

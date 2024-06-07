@@ -20,76 +20,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
-var ignoredELFPrefixes = []string{
-	"2/",                              // Calls within the endpoint
-	"HOST_IP",                         // Global
-	"IPV6_NODEPORT",                   // Global
-	"ROUTER_IP",                       // Global
-	"SNAT_IPV6_EXTERNAL",              // Global
-	"cilium_auth_map",                 // Global
-	"cilium_call_policy",              // Global
-	"cilium_egresscall_policy",        // Global
-	"cilium_capture",                  // Global
-	"cilium_ct",                       // All CT maps, including local
-	"cilium_encrypt_state",            // Global
-	"cilium_events",                   // Global
-	"cilium_ipcache",                  // Global
-	"cilium_ktime",                    // Global
-	"cilium_lb",                       // Global
-	"cilium_lxc",                      // Global
-	"cilium_metrics",                  // Global
-	"cilium_nodeport_neigh",           // All nodeport neigh maps
-	"cilium_node_map",                 // Global
-	"cilium_node_map_v2",              // Global
-	"cilium_policy",                   // All policy maps
-	"cilium_proxy",                    // Global
-	"cilium_runtime_config",           // Global
-	"cilium_signals",                  // Global
-	"cilium_snat",                     // All SNAT maps
-	"cilium_tail_call_buffer",         // Global
-	"cilium_tunnel",                   // Global
-	"cilium_ipv4_frag_datagrams",      // Global
-	"cilium_ipmasq",                   // Global
-	"cilium_throttle",                 // Global
-	"cilium_egress_gw_policy_v4",      // Global
-	"cilium_srv6_policy_v4",           // Global
-	"cilium_srv6_policy_v6",           // Global
-	"cilium_srv6_vrf_v4",              // Global
-	"cilium_srv6_vrf_v6",              // Global
-	"cilium_srv6_state_v4",            // Global
-	"cilium_srv6_state_v6",            // Global
-	"cilium_srv6_sid",                 // Global
-	"cilium_vtep_map",                 // Global
-	"cilium_per_cluster_ct",           // Global
-	"cilium_per_cluster_snat",         // Global
-	"cilium_world_cidrs4",             // Global
-	"cilium_l2_responder_v4",          // Global
-	"cilium_ratelimit",                // Global
-	"cilium_mcast_group_outer_v4_map", // Global
-	"cilium_skip_lb4",                 // Global
-	"tc",                              // Program Section
-	"xdp",                             // Program Section
-	".BTF",                            // Debug
-	".BTF.ext",                        // Debug
-	".debug_ranges",                   // Debug
-	".debug_info",                     // Debug
-	".debug_line",                     // Debug
-	".debug_frame",                    // Debug
-	".debug_loc",                      // Debug
-	".debug_addr",                     // Debug
-	".debug_str_offsets",              // Debug
-	// Endpoint IPv6 address. It's possible for the template object to have
-	// these symbols while the endpoint doesn't, if IPv6 was just enabled and
-	// the endpoint restored.
-	"LXC_IP_",
-	// The default val (14) is used for all devices except for L2-less devices
-	// for which we set ETH_HLEN=0 during load time.
-	"ETH_HLEN",
-	// identity_length is global configuration value that is used to set the bit-length of identity
-	// in a numeric identity.
-	"identity_length",
-}
-
 // RestoreTemplates populates the object cache from templates on the filesystem
 // at the specified path.
 func (l *loader) RestoreTemplates(stateDir string) error {
@@ -167,7 +97,7 @@ func (o *objectCache) serialize(key string) *cachedObject {
 
 // build attempts to compile and cache a datapath template object file
 // corresponding to the specified endpoint configuration.
-func (o *objectCache) build(ctx context.Context, cfg *templateCfg, dir *directoryInfo, hash string) (string, error) {
+func (o *objectCache) build(ctx context.Context, nodeCfg *datapath.LocalNodeConfiguration, cfg datapath.EndpointConfiguration, stats *metrics.SpanStat, dir *directoryInfo, hash string) (string, error) {
 	isHost := cfg.IsHost()
 	templatePath := filepath.Join(o.workingDirectory, defaults.TemplatesDir, hash)
 	dir = &directoryInfo{
@@ -193,20 +123,20 @@ func (o *objectCache) build(ctx context.Context, cfg *templateCfg, dir *director
 		return "", fmt.Errorf("failed to open template header for writing: %w", err)
 	}
 	defer f.Close()
-	if err = o.ConfigWriter.WriteEndpointConfig(f, cfg); err != nil {
+	if err = o.ConfigWriter.WriteEndpointConfig(f, nodeCfg, cfg); err != nil {
 		return "", fmt.Errorf("failed to write template header: %w", err)
 	}
 
-	cfg.stats.BpfCompilation.Start()
+	stats.BpfCompilation.Start()
 	err = compileDatapath(ctx, dir, isHost, log)
-	cfg.stats.BpfCompilation.End(err == nil)
+	stats.BpfCompilation.End(err == nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to compile template program: %w", err)
 	}
 
 	log.WithFields(logrus.Fields{
 		logfields.Path:               objectPath,
-		logfields.BPFCompilationTime: cfg.stats.BpfCompilation.Total(),
+		logfields.BPFCompilationTime: stats.BpfCompilation.Total(),
 	}).Info("Compiled new BPF template")
 
 	return objectPath, nil
@@ -220,9 +150,11 @@ func (o *objectCache) build(ctx context.Context, cfg *templateCfg, dir *director
 //
 // Returns the path to the compiled template datapath object and whether the
 // object was compiled, or an error.
-func (o *objectCache) fetchOrCompile(ctx context.Context, cfg datapath.EndpointConfiguration, dir *directoryInfo, stats *metrics.SpanStat) (file *os.File, compiled bool, err error) {
+func (o *objectCache) fetchOrCompile(ctx context.Context, nodeCfg *datapath.LocalNodeConfiguration, cfg datapath.EndpointConfiguration, dir *directoryInfo, stats *metrics.SpanStat) (file *os.File, compiled bool, err error) {
+	cfg = wrap(cfg)
+
 	var hash string
-	hash, err = o.baseHash.sumEndpoint(o, cfg, false)
+	hash, err = o.baseHash.sumEndpoint(o, nodeCfg, cfg, false)
 	if err != nil {
 		return nil, false, err
 	}
@@ -255,7 +187,11 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, cfg datapath.EndpointC
 		}
 	}
 
-	path, err := o.build(ctx, wrap(cfg, stats), dir, hash)
+	if stats == nil {
+		stats = &metrics.SpanStat{}
+	}
+
+	path, err := o.build(ctx, nodeCfg, cfg, stats, dir, hash)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			scopedLog.WithError(err).Error("BPF template object creation failed")

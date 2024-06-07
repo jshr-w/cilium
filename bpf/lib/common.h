@@ -122,7 +122,7 @@ enum {
 #define CILIUM_CALL_IPV6_CT_EGRESS		32
 #define CILIUM_CALL_SRV6_ENCAP			33
 #define CILIUM_CALL_SRV6_DECAP			34
-#define CILIUM_CALL_SRV6_REPLY			35
+/* Unused CILIUM_CALL_SRV6_REPLY		35 */
 #define CILIUM_CALL_IPV4_NODEPORT_NAT_INGRESS	36
 #define CILIUM_CALL_IPV6_NODEPORT_NAT_INGRESS	37
 #define CILIUM_CALL_IPV4_NODEPORT_SNAT_FWD	38
@@ -481,16 +481,6 @@ struct srv6_policy_key6 {
 	union v6addr dst_cidr;
 };
 
-struct srv6_ipv4_2tuple {
-	__u32 src;
-	__u32 dst;
-};
-
-struct srv6_ipv6_2tuple {
-	union v6addr src;
-	union v6addr dst;
-};
-
 struct vtep_key {
 	__u32 vtep_ip;
 };
@@ -648,7 +638,7 @@ enum {
 #define DROP_INVALID_VNI	-183
 #define DROP_INVALID_TC_BUFFER  -184
 #define DROP_NO_SID		-185
-#define DROP_MISSING_SRV6_STATE	-186
+#define DROP_MISSING_SRV6_STATE	-186 /* unused */
 #define DROP_NAT46		-187
 #define DROP_NAT64		-188
 #define DROP_POLICY_AUTH_REQUIRED	-189
@@ -719,16 +709,22 @@ enum metric_dir {
  *    In the IPsec case this becomes the SPI on the wire.
  */
 #define MARK_MAGIC_HOST_MASK		0x0F00
+#define MARK_MAGIC_PROXY_TO_WORLD	0x0800
 #define MARK_MAGIC_PROXY_EGRESS_EPID	0x0900 /* mark carries source endpoint ID */
 #define MARK_MAGIC_PROXY_INGRESS	0x0A00
 #define MARK_MAGIC_PROXY_EGRESS		0x0B00
 #define MARK_MAGIC_HOST			0x0C00
 #define MARK_MAGIC_DECRYPT		0x0D00
+/* used to identify encrypted overlay traffic post decryption.
+ * therefore, SPI bit can be reused to not steal an additional magic mark value.
+ */
+#define MARK_MAGIC_DECRYPTED_OVERLAY	0x1D00
 #define MARK_MAGIC_ENCRYPT		0x0E00
 #define MARK_MAGIC_IDENTITY		0x0F00 /* mark carries identity */
 #define MARK_MAGIC_TO_PROXY		0x0200
 #define MARK_MAGIC_SNAT_DONE		0x0300
 #define MARK_MAGIC_OVERLAY		0x0400
+#define MARK_MAGIC_EGW_DONE		0x0500
 
 #define MARK_MAGIC_KEY_MASK		0xFF00
 
@@ -781,9 +777,6 @@ enum metric_dir {
 #define DSR_IPV6_OPT_TYPE	0x1B
 #define DSR_IPV6_OPT_LEN	(sizeof(struct dsr_opt_v6) - 4)
 #define DSR_IPV6_EXT_LEN	((sizeof(struct dsr_opt_v6) - 8) / 8)
-
-/* We cap key index at 4 bits because mark value is used to map ctx to key */
-#define MAX_KEY_INDEX 15
 
 /* encrypt_config is the current encryption context on the node */
 struct encrypt_config {
@@ -889,7 +882,6 @@ enum ct_status {
 	CT_ESTABLISHED,
 	CT_REPLY,
 	CT_RELATED,
-	CT_REOPENED,
 } __packed;
 
 /* Service flags (lb{4,6}_service->flags) */
@@ -1025,7 +1017,8 @@ struct lb6_backend {
 				 * backends that have the same IP address,
 				 * but belong to the different cluster.
 				 */
-	__u8 pad[2];
+	__u8 zone;
+	__u8 pad;
 };
 
 struct lb6_health {
@@ -1084,7 +1077,8 @@ struct lb4_backend {
 				 * backends that have the same IP address,
 				 * but belong to the different cluster.
 				 */
-	__u8 pad[2];
+	__u8 zone;
+	__u8 pad;
 };
 
 struct lb4_health {

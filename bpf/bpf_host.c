@@ -398,7 +398,11 @@ skip_tunnel:
 	if (from_proxy && info->tunnel_endpoint && encrypt_key)
 		return set_ipsec_encrypt(ctx, encrypt_key, info->tunnel_endpoint,
 					 info->sec_identity, true, false);
-#endif
+
+	if (from_proxy &&
+	    (!info || !identity_is_cluster(info->sec_identity)))
+		ctx->mark = MARK_MAGIC_PROXY_TO_WORLD;
+#endif /* ENABLE_IPSEC && !TUNNEL_MODE */
 
 	return CTX_ACT_OK;
 }
@@ -854,7 +858,11 @@ skip_tunnel:
 	if (from_proxy && info->tunnel_endpoint && encrypt_key)
 		return set_ipsec_encrypt(ctx, encrypt_key, info->tunnel_endpoint,
 					 info->sec_identity, true, false);
-#endif
+
+	if (from_proxy &&
+	    (!info || !identity_is_cluster(info->sec_identity)))
+		ctx->mark = MARK_MAGIC_PROXY_TO_WORLD;
+#endif /* ENABLE_IPSEC && !TUNNEL_MODE */
 
 	return CTX_ACT_OK;
 }
@@ -1005,7 +1013,7 @@ static __always_inline int do_netdev_encrypt_encap(struct __ctx_buff *ctx, __u32
 #ifdef ENABLE_L2_ANNOUNCEMENTS
 static __always_inline int handle_l2_announcement(struct __ctx_buff *ctx)
 {
-	union macaddr mac = NODE_MAC;
+	union macaddr mac = THIS_INTERFACE_MAC;
 	union macaddr smac;
 	__be32 sip;
 	__be32 tip;
@@ -1059,6 +1067,19 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 
 #ifdef ENABLE_IPSEC
 	if (!from_host) {
+#ifdef ENABLE_ENCRYPTED_OVERLAY
+		/* EncryptedOverlay XFRM policies set the output mark to the literal
+		 * MARK_MAGIC_DECRYPTED_OVERLAY value.
+		 *
+		 * If we see this here, its decrypted overlay traffic from these
+		 * XFRM policies. We can punt this directly to ingress side of vxlan
+		 * interface for decap.
+		 */
+		if (ctx->mark == MARK_MAGIC_DECRYPTED_OVERLAY) {
+			ret = ctx_redirect(ctx, ENCAP_IFINDEX, BPF_F_INGRESS);
+			return ret;
+		}
+#endif /* ENABLED_ENCRYPTED_OVERLAY */
 		/* If the packet needs decryption, we want to send it straight to the
 		 * stack. There's no need to run service handling logic, host firewall,
 		 * etc. on an encrypted packet.
@@ -1083,14 +1104,15 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 		if (magic == MARK_MAGIC_PROXY_EGRESS_EPID) {
 			/* extracted identity is actually the endpoint ID */
 			ret = tail_call_egress_policy(ctx, (__u16)identity);
-			return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
+			return send_drop_notify_error(ctx, UNKNOWN_ID, ret, CTX_ACT_DROP,
 						      METRIC_EGRESS);
 		}
 #endif
 
 #ifdef ENABLE_IPSEC
 		if (magic == MARK_MAGIC_ENCRYPT) {
-			send_trace_notify(ctx, TRACE_FROM_STACK, identity, 0, 0,
+			send_trace_notify(ctx, TRACE_FROM_STACK, identity, UNKNOWN_ID,
+					  TRACE_EP_ID_UNKNOWN,
 					  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
 			ret = CTX_ACT_OK;
 # ifdef TUNNEL_MODE
@@ -1104,8 +1126,8 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, const bool from_host)
 #endif /* ENABLE_IPSEC */
 	}
 
-	send_trace_notify(ctx, trace, identity, 0, 0, ctx->ingress_ifindex,
-			  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
+	send_trace_notify(ctx, trace, identity, UNKNOWN_ID, TRACE_EP_ID_UNKNOWN,
+			  ctx->ingress_ifindex, TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
 
 	bpf_clear_meta(ctx);
 
@@ -1221,11 +1243,12 @@ handle_netdev(struct __ctx_buff *ctx, const bool from_host)
 			break;
 		}
 #endif
-		return send_drop_notify(ctx, sec_label, id, 0, ret,
+		return send_drop_notify(ctx, sec_label, id, TRACE_EP_ID_UNKNOWN, ret,
 					CTX_ACT_DROP, METRIC_EGRESS);
 #else
-		send_trace_notify(ctx, TRACE_TO_STACK, HOST_ID, 0, 0, 0,
-				  TRACE_REASON_UNKNOWN, 0);
+		send_trace_notify(ctx, TRACE_TO_STACK, HOST_ID, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN,
+				  TRACE_IFINDEX_UNKNOWN, TRACE_REASON_UNKNOWN, 0);
 		/* Pass unknown traffic to the stack */
 		return CTX_ACT_OK;
 #endif /* ENABLE_HOST_FIREWALL */
@@ -1349,7 +1372,7 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 	__u32 src_sec_identity = 0;
 	int ret = CTX_ACT_OK;
 	__s8 ext_err = 0;
-#ifdef ENABLE_HOST_FIREWALL
+#if defined(ENABLE_HOST_FIREWALL) || defined(ENABLE_EGRESS_GATEWAY_COMMON)
 	__u16 proto = 0;
 #endif
 
@@ -1363,10 +1386,9 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 		if (vlan_id) {
 			if (allow_vlan(ctx->ifindex, vlan_id))
 				return CTX_ACT_OK;
-			else
-				return send_drop_notify_error(ctx, src_sec_identity,
-							      DROP_VLAN_FILTERED,
-							      CTX_ACT_DROP, METRIC_EGRESS);
+
+			ret = DROP_VLAN_FILTERED;
+			goto drop_err;
 		}
 	}
 
@@ -1376,18 +1398,20 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 
 		ctx->mark = 0;
 		ret = tail_call_egress_policy(ctx, (__u16)lxc_id);
-		return send_drop_notify_error(ctx, src_sec_identity, ret,
-					      CTX_ACT_DROP, METRIC_EGRESS);
+		goto drop_err;
 	}
 #endif
 
 #ifdef ENABLE_HOST_FIREWALL
+	/* This was initially added for Egress GW. There it's no longer needed,
+	 * but it potentially also helps other paths (LB-to-remote-backend ?).
+	 */
 	if (ctx_snat_done(ctx))
 		goto skip_host_firewall;
 
 	if (!validate_ethertype(ctx, &proto)) {
 		ret = DROP_UNSUPPORTED_L2;
-		goto out;
+		goto drop_err;
 	}
 
 	policy_clear_mark(ctx);
@@ -1415,11 +1439,9 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 		ret = DROP_UNKNOWN_L3;
 		break;
 	}
-out:
+
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, src_sec_identity,
-						  ret, ext_err, CTX_ACT_DROP,
-						  METRIC_EGRESS);
+		goto drop_err;
 
 skip_host_firewall:
 #endif /* ENABLE_HOST_FIREWALL */
@@ -1444,13 +1466,13 @@ skip_host_firewall:
 			/* we are redirecting back into the stack, so TRACE_TO_STACK
 			 * for tracepoint
 			 */
-			send_trace_notify(ctx, TRACE_TO_STACK, 0, 0, 0,
-					  0, TRACE_REASON_ENCRYPT_OVERLAY, 0);
+			send_trace_notify(ctx, TRACE_TO_STACK, UNKNOWN_ID, UNKNOWN_ID,
+					  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
+					  TRACE_REASON_ENCRYPT_OVERLAY, 0);
 			return ret;
 		}
 		if (IS_ERR(ret))
-			return send_drop_notify_error(ctx, src_sec_identity, ret,
-						      CTX_ACT_DROP, METRIC_EGRESS);
+			goto drop_err;
 	}
 #endif /* ENABLE_ENCRYPTED_OVERLAY */
 
@@ -1479,15 +1501,14 @@ skip_host_firewall:
 		if (ret == CTX_ACT_REDIRECT)
 			return ret;
 		else if (IS_ERR(ret))
-			return send_drop_notify_error(ctx, src_sec_identity, ret,
-						      CTX_ACT_DROP, METRIC_EGRESS);
+			goto drop_err;
 	}
 
 #if defined(ENCRYPTION_STRICT_MODE)
-	if (!strict_allow(ctx))
-		return send_drop_notify_error(ctx, src_sec_identity,
-					      DROP_UNENCRYPTED_TRAFFIC,
-					      CTX_ACT_DROP, METRIC_EGRESS);
+	if (!strict_allow(ctx)) {
+		ret = DROP_UNENCRYPTED_TRAFFIC;
+		goto drop_err;
+	}
 #endif /* ENCRYPTION_STRICT_MODE */
 #endif /* ENABLE_WIREGUARD */
 
@@ -1495,6 +1516,75 @@ skip_host_firewall:
 	ret = lb_handle_health(ctx);
 	if (ret != CTX_ACT_OK)
 		goto exit;
+#endif
+
+#ifdef ENABLE_EGRESS_GATEWAY_COMMON
+	{
+		void *data, *data_end;
+		struct iphdr *ip4;
+		struct ipv4_ct_tuple tuple = {};
+		struct ct_state ct_state = {};
+		enum ct_status ct_status;
+		bool has_l4_header = true;
+		int l4_off;
+		struct remote_endpoint_info *info;
+		struct endpoint_info *src_ep;
+		__u32 dst_sec_identity = UNKNOWN_ID;
+
+		if (!validate_ethertype(ctx, &proto) || proto != bpf_htons(ETH_P_IP))
+			goto skip_egress_gateway;
+
+		if (ctx_egw_done(ctx))
+			goto skip_egress_gateway;
+
+		if (!revalidate_data(ctx, &data, &data_end, &ip4)) {
+			ret = DROP_INVALID;
+			goto drop_err;
+		}
+
+		tuple.nexthdr = ip4->protocol;
+		tuple.daddr = ip4->daddr;
+		tuple.saddr = ip4->saddr;
+
+		l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
+		ret = ct_extract_ports4(ctx, ip4, l4_off, CT_EGRESS, &tuple,
+					&has_l4_header);
+		if (IS_ERR(ret)) {
+			if (ret == DROP_CT_UNKNOWN_PROTO)
+				goto skip_egress_gateway;
+
+			goto drop_err;
+		}
+
+		__ipv4_ct_tuple_reverse(&tuple);
+		ret = ct_lazy_lookup4(get_ct_map4(&tuple),
+				      &tuple, ctx, ipv4_is_fragment(ip4),
+				      l4_off, has_l4_header, CT_EGRESS,
+				      SCOPE_FORWARD, CT_ENTRY_ANY,
+				      &ct_state, &trace.monitor);
+		if (IS_ERR(ret))
+			goto drop_err;
+
+		ct_status = (enum ct_status)ret;
+
+		src_ep = __lookup_ip4_endpoint(ip4->saddr);
+		if (src_ep)
+			src_sec_identity = src_ep->sec_id;
+
+		info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
+		if (info && info->sec_identity)
+			dst_sec_identity = info->sec_identity;
+
+		ret = egress_gw_handle_packet(ctx, &tuple, ct_status,
+					      src_sec_identity, dst_sec_identity,
+					      &trace);
+		if (IS_ERR(ret))
+			goto drop_err;
+
+		if (ret != CTX_ACT_OK)
+			return ret;
+	}
+skip_egress_gateway:
 #endif
 
 #ifdef ENABLE_NODEPORT
@@ -1513,12 +1603,17 @@ skip_host_firewall:
 exit:
 #endif
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
-						  CTX_ACT_DROP, METRIC_EGRESS);
-	send_trace_notify(ctx, TRACE_TO_NETWORK, 0, 0, 0,
-			  0, trace.reason, trace.monitor);
+		goto drop_err;
+
+	send_trace_notify(ctx, TRACE_TO_NETWORK, UNKNOWN_ID, UNKNOWN_ID,
+			  TRACE_EP_ID_UNKNOWN,
+			  TRACE_IFINDEX_UNKNOWN, trace.reason, trace.monitor);
 
 	return ret;
+
+drop_err:
+	return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
+					  CTX_ACT_DROP, METRIC_EGRESS);
 }
 
 /*
@@ -1602,7 +1697,8 @@ out:
 						  CTX_ACT_DROP, METRIC_INGRESS);
 
 	if (!traced)
-		send_trace_notify(ctx, TRACE_TO_STACK, src_id, 0, 0,
+		send_trace_notify(ctx, TRACE_TO_STACK, src_id, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN,
 				  CILIUM_IFINDEX, trace.reason, trace.monitor);
 
 	return ret;
@@ -1699,7 +1795,7 @@ to_host_from_lxc(struct __ctx_buff *ctx __maybe_unused)
 
 out:
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, 0, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, UNKNOWN_ID, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_INGRESS);
 	return ret;
 }
@@ -1782,7 +1878,7 @@ int handle_lxc_traffic(struct __ctx_buff *ctx)
 
 		lxc_id = ctx_load_meta(ctx, CB_DST_ENDPOINT_ID);
 		ctx_store_meta(ctx, CB_SRC_LABEL, HOST_ID);
-		ret = tail_call_policy_dynamic(ctx, (__u16)lxc_id);
+		ret = tail_call_policy(ctx, (__u16)lxc_id);
 		return send_drop_notify_error(ctx, HOST_ID, ret,
 					      CTX_ACT_DROP, METRIC_EGRESS);
 	}

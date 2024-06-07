@@ -128,7 +128,8 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 		 */
 		ctx_change_type(ctx, PACKET_HOST);
 
-		send_trace_notify(ctx, TRACE_TO_STACK, *identity, 0, 0,
+		send_trace_notify(ctx, TRACE_TO_STACK, *identity, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN,
 				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
 
 		return CTX_ACT_OK;
@@ -149,7 +150,7 @@ not_esp:
 #ifdef HOST_IFINDEX
 	if (1) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		union macaddr router_mac = NODE_MAC;
+		union macaddr router_mac = THIS_INTERFACE_MAC;
 
 		ret = ipv6_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
 			      (__u8 *)&host_mac.addr, METRIC_INGRESS);
@@ -186,7 +187,7 @@ static __always_inline int ipv4_host_delivery(struct __ctx_buff *ctx, struct iph
 #ifdef HOST_IFINDEX
 	if (1) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		union macaddr router_mac = NODE_MAC;
+		union macaddr router_mac = THIS_INTERFACE_MAC;
 		int ret;
 
 		ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
@@ -408,7 +409,8 @@ skip_vtep:
 		 */
 		ctx_change_type(ctx, PACKET_HOST);
 
-		send_trace_notify(ctx, TRACE_TO_STACK, *identity, 0, 0,
+		send_trace_notify(ctx, TRACE_TO_STACK, *identity, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN,
 				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
 
 		return CTX_ACT_OK;
@@ -426,6 +428,8 @@ not_esp:
 			ret = ipv4_l3(ctx, ETH_HLEN, NULL, NULL, ip4);
 			if (unlikely(ret != CTX_ACT_OK))
 				return ret;
+
+			ctx_egw_done_set(ctx);
 
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
 			ret = egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
@@ -478,7 +482,7 @@ int tail_handle_ipv4(struct __ctx_buff *ctx)
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
 int tail_handle_arp(struct __ctx_buff *ctx)
 {
-	union macaddr mac = NODE_MAC;
+	union macaddr mac = THIS_INTERFACE_MAC;
 	union macaddr smac;
 	struct trace_ctx trace = {
 		.reason = TRACE_REASON_CT_REPLY,
@@ -494,7 +498,7 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 
 	key_size = TUNNEL_KEY_WITHOUT_SRC_IP;
 	if (unlikely(ctx_get_tunnel_key(ctx, &key, key_size, 0) < 0))
-		return send_drop_notify_error(ctx, 0, DROP_NO_TUNNEL_KEY, CTX_ACT_DROP,
+		return send_drop_notify_error(ctx, UNKNOWN_ID, DROP_NO_TUNNEL_KEY, CTX_ACT_DROP,
 										METRIC_INGRESS);
 
 	if (!arp_validate(ctx, &mac, &smac, &sip, &tip) || !__lookup_ip4_endpoint(tip))
@@ -506,9 +510,9 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 
 	ret = arp_prepare_response(ctx, &mac, tip, &smac, sip);
 	if (unlikely(ret != 0))
-		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, METRIC_EGRESS);
+		return send_drop_notify_error(ctx, UNKNOWN_ID, ret, CTX_ACT_DROP, METRIC_EGRESS);
 	if (info->tunnel_endpoint) {
-		ret = __encap_and_redirect_with_nodeid(ctx, 0, info->tunnel_endpoint,
+		ret = __encap_and_redirect_with_nodeid(ctx, UNKNOWN_ID, info->tunnel_endpoint,
 						       LOCAL_NODE_ID, WORLD_IPV4_ID,
 						       WORLD_IPV4_ID, &trace);
 		if (IS_ERR(ret))
@@ -519,10 +523,11 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 
 	ret = DROP_UNKNOWN_L3;
 drop_err:
-	return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, METRIC_EGRESS);
+	return send_drop_notify_error(ctx, UNKNOWN_ID, ret, CTX_ACT_DROP, METRIC_EGRESS);
 
 pass_to_stack:
-	send_trace_notify(ctx, TRACE_TO_STACK, 0, 0, 0, ctx->ingress_ifindex,
+	send_trace_notify(ctx, TRACE_TO_STACK, UNKNOWN_ID, UNKNOWN_ID,
+			  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
 			  trace.reason, trace.monitor);
 	return CTX_ACT_OK;
 }
@@ -652,7 +657,8 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 
 #ifdef ENABLE_IPSEC
 	if (is_esp(ctx, proto))
-		send_trace_notify(ctx, TRACE_FROM_OVERLAY, src_sec_identity, 0, 0,
+		send_trace_notify(ctx, TRACE_FROM_OVERLAY, src_sec_identity, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN,
 				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
 	else
 #endif
@@ -665,8 +671,8 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 		if (decrypted)
 			obs_point = TRACE_FROM_STACK;
 
-		send_trace_notify(ctx, obs_point, src_sec_identity, 0, 0,
-				  ctx->ingress_ifindex,
+		send_trace_notify(ctx, obs_point, src_sec_identity, UNKNOWN_ID,
+				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
 				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
 	}
 
@@ -776,7 +782,7 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 out:
 #endif
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, 0, ret, ext_err,
+		return send_drop_notify_error_ext(ctx, UNKNOWN_ID, ret, ext_err,
 						  CTX_ACT_DROP, METRIC_EGRESS);
 	return ret;
 }

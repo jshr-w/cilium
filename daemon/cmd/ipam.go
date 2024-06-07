@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/cilium/statedb"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/swag"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/cidr"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
+	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	iputil "github.com/cilium/cilium/pkg/ip"
@@ -519,6 +521,12 @@ func (d *Daemon) allocateIPs(ctx context.Context, router restoredIPs) error {
 	log.Infof("  Local node-name: %s", nodeTypes.GetName())
 	log.Infof("  Node-IPv6: %s", node.GetIPv6())
 
+	iter, _ := d.nodeAddrs.All(d.db.ReadTxn())
+	addrs := statedb.Collect(
+		statedb.Filter(
+			iter,
+			func(addr tables.NodeAddress) bool { return addr.DeviceName != tables.WildcardDeviceName }))
+
 	if option.Config.EnableIPv6 {
 		log.Infof("  IPv6 allocation prefix: %s", node.GetIPv6AllocRange())
 
@@ -528,12 +536,10 @@ func (d *Daemon) allocateIPs(ctx context.Context, router restoredIPs) error {
 
 		log.Infof("  IPv6 router address: %s", node.GetIPv6Router())
 
-		if addrs, err := d.datapath.LocalNodeAddressing().IPv6().LocalAddresses(); err != nil {
-			log.WithError(err).Fatal("Unable to list local IPv6 addresses")
-		} else {
-			log.Info("  Local IPv6 addresses:")
-			for _, ip := range addrs {
-				log.Infof("  - %s", ip)
+		log.Info("  Local IPv6 addresses:")
+		for _, addr := range addrs {
+			if addr.Addr.Is6() {
+				log.Infof("  - %s", addr.Addr)
 			}
 		}
 	}
@@ -556,12 +562,10 @@ func (d *Daemon) allocateIPs(ctx context.Context, router restoredIPs) error {
 		node.SetIPv4Loopback(loopbackIPv4)
 		log.Infof("  Loopback IPv4: %s", node.GetIPv4Loopback().String())
 
-		if addrs, err := d.datapath.LocalNodeAddressing().IPv4().LocalAddresses(); err != nil {
-			log.WithError(err).Fatal("Unable to list local IPv4 addresses")
-		} else {
-			log.Info("  Local IPv4 addresses:")
-			for _, ip := range addrs {
-				log.Infof("  - %s", ip)
+		log.Info("  Local IPv4 addresses:")
+		for _, addr := range addrs {
+			if addr.Addr.Is4() {
+				log.Infof("  - %s", addr.Addr)
 			}
 		}
 	}

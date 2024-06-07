@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "dbg.h"
+#include "hash.h"
 #include "trace.h"
 #include "l3.h"
 
@@ -36,8 +37,8 @@ __encap_with_nodeid(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
 
 	cilium_dbg(ctx, DBG_ENCAP, node_id, seclabel);
 
-	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, 0, *ifindex,
-			  ct_reason, monitor);
+	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
+			  *ifindex, ct_reason, monitor);
 
 	return ctx_set_encap_info(ctx, src_ip, src_port, node_id, seclabel, vni,
 				  NULL, 0, ifindex);
@@ -223,8 +224,8 @@ __encap_with_nodeid_opt(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
 
 	cilium_dbg(ctx, DBG_ENCAP, node_id, seclabel);
 
-	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, 0, *ifindex,
-			  ct_reason, monitor);
+	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
+			  *ifindex, ct_reason, monitor);
 
 	return ctx_set_encap_info(ctx, src_ip, src_port, node_id, seclabel, vni, opt,
 				  opt_len, ifindex);

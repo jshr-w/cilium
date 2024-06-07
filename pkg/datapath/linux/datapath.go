@@ -4,13 +4,13 @@
 package linux
 
 import (
-	loader "github.com/cilium/cilium/pkg/datapath/loader/types"
+	"github.com/cilium/statedb"
+
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/node/manager"
-	"github.com/cilium/cilium/pkg/statedb"
 )
 
 // DatapathConfiguration is the static configuration of the datapath. The
@@ -30,7 +30,7 @@ type linuxDatapath struct {
 	nodeIDHandler  datapath.NodeIDHandler
 	nodeNeighbors  datapath.NodeNeighbors
 	nodeAddressing datapath.NodeAddressing
-	loader         loader.Loader
+	loader         datapath.Loader
 	wgAgent        datapath.WireguardAgent
 	lbmap          datapath.LBMap
 	bwmgr          datapath.BandwidthManager
@@ -45,7 +45,7 @@ type DatapathParams struct {
 	BWManager      datapath.BandwidthManager
 	NodeAddressing datapath.NodeAddressing
 	MTU            datapath.MTUConfiguration
-	Loader         loader.Loader
+	Loader         datapath.Loader
 	NodeManager    manager.NodeManager
 	DB             *statedb.DB
 	Devices        statedb.Table[*tables.Device]
@@ -111,10 +111,6 @@ func (l *linuxDatapath) LBMap() datapath.LBMap {
 
 func (l *linuxDatapath) BandwidthManager() datapath.BandwidthManager {
 	return l.bwmgr
-}
-
-func (l *linuxDatapath) DeleteEndpointBandwidthLimit(epID uint16) error {
-	return l.bwmgr.DeleteEndpointBandwidthLimit(epID)
 }
 
 func (l *linuxDatapath) Orchestrator() datapath.Orchestrator {

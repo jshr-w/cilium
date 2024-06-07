@@ -35,6 +35,11 @@ cluster:
   traffic.
 * Fully compatible with existing kube-proxy model
 
+.. admonition:: Video
+ :class: attention
+
+  If you'd like to learn more about Kubernetes networking and Cilium, check out `eCHO episode 99: Explain Kubernetes Networking and Cilium to Network Engineers <https://www.youtube.com/watch?v=kMPKzb_kW68>`__.
+
 .. _pod_connectivity:
 
 Pod-to-Pod Connectivity
@@ -78,6 +83,5 @@ The Kubernetes documentation contains more background on the `Kubernetes
 Networking Model
 <https://kubernetes.io/docs/concepts/cluster-administration/networking/>`_ and
 `Kubernetes Network Plugins
-<https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/>`_
-.
+<https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/>`_.
 

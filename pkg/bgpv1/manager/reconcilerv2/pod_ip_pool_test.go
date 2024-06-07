@@ -5,6 +5,7 @@ package reconcilerv2
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -19,6 +20,7 @@ import (
 	ipamtypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	"github.com/cilium/cilium/pkg/k8s/resource"
 	slimv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 )
 
@@ -55,6 +57,62 @@ var (
 			IPv6: &v2alpha1.IPv6PoolSpec{
 				CIDRs:    []v2alpha1.PoolCIDR{redPoolCIDRv6},
 				MaskSize: 96,
+			},
+		},
+	}
+	redPeer65001v4PodIPPoolRPName = PolicyName("red-peer-65001", "ipv4", fmt.Sprintf("%s-%s", redPoolName, redPoolNamespace))
+	redPeer65001v4PodIPPoolRP     = &types.RoutePolicy{
+		Name: redPeer65001v4PodIPPoolRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(string(redPoolNodePrefix1v4)),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
+						},
+						{
+							CIDR:         netip.MustParsePrefix(string(redPoolNodePrefix2v4)),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65000:200"},
+				},
+			},
+		},
+	}
+	redPeer65001v6PodIPPoolRPName = PolicyName("red-peer-65001", "ipv6", fmt.Sprintf("%s-%s", redPoolName, redPoolNamespace))
+	redPeer65001v6PodIPPoolRP     = &types.RoutePolicy{
+		Name: redPeer65001v6PodIPPoolRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(string(redPoolNodePrefix1v6)),
+							PrefixLenMin: 96,
+							PrefixLenMax: 96,
+						},
+						{
+							CIDR:         netip.MustParsePrefix(string(redPoolNodePrefix2v6)),
+							PrefixLenMin: 96,
+							PrefixLenMax: 96,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65000:200"},
+				},
 			},
 		},
 	}
@@ -102,20 +160,78 @@ var (
 			},
 		},
 	}
+	bluePeer65001v4PodIPPoolRPName = PolicyName("blue-peer-65001", "ipv4", fmt.Sprintf("%s-%s", bluePoolName, bluePoolNamespace))
+	bluePeer65001v4PodIPPoolRP     = &types.RoutePolicy{
+		Name: bluePeer65001v4PodIPPoolRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []string{"10.10.10.2/32"},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(string(bluePoolNodePrefix1v4)),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
+						},
+						{
+							CIDR:         netip.MustParsePrefix(string(bluePoolNodePrefix2v4)),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65355:200"},
+				},
+			},
+		},
+	}
+	bluePeer65001v6PodIPPoolRPName = PolicyName("blue-peer-65001", "ipv6", fmt.Sprintf("%s-%s", bluePoolName, bluePoolNamespace))
+	bluePeer65001v6PodIPPoolRP     = &types.RoutePolicy{
+		Name: bluePeer65001v6PodIPPoolRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []string{"10.10.10.2/32"},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(string(bluePoolNodePrefix1v6)),
+							PrefixLenMin: 96,
+							PrefixLenMax: 96,
+						},
+						{
+							CIDR:         netip.MustParsePrefix(string(bluePoolNodePrefix2v6)),
+							PrefixLenMin: 96,
+							PrefixLenMax: 96,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65355:200"},
+				},
+			},
+		},
+	}
 )
 
 func Test_PodIPPoolAdvertisements(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
 
 	tests := []struct {
-		name                  string
-		peerConfig            []*v2alpha1.CiliumBGPPeerConfig
-		advertisements        []*v2alpha1.CiliumBGPAdvertisement
-		pools                 []*v2alpha1.CiliumPodIPPool
-		preconfiguredAdverts  map[types.Family]map[string]struct{}
-		testCiliumNode        *v2api.CiliumNode
-		testBGPInstanceConfig *v2alpha1.CiliumBGPNodeInstance
-		expectedAdverts       map[types.Family]map[string]struct{}
+		name                     string
+		peerConfig               []*v2alpha1.CiliumBGPPeerConfig
+		advertisements           []*v2alpha1.CiliumBGPAdvertisement
+		pools                    []*v2alpha1.CiliumPodIPPool
+		preconfiguredPoolAFPaths map[resource.Key]map[types.Family]map[string]struct{}
+		preconfiguredRPs         ResourceRoutePolicyMap
+		testCiliumNode           *v2api.CiliumNode
+		testBGPInstanceConfig    *v2alpha1.CiliumBGPNodeInstance
+		expectedPoolAFPaths      map[resource.Key]map[types.Family]map[string]struct{}
+		expectedRPs              ResourceRoutePolicyMap
 	}{
 		{
 			name: "dual stack, advertisement selects pools (by label), pool present on the node",
@@ -131,7 +247,8 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 				redPool,
 				bluePool,
 			},
-			preconfiguredAdverts: map[types.Family]map[string]struct{}{},
+			preconfiguredPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
+			preconfiguredRPs:         ResourceRoutePolicyMap{},
 			testCiliumNode: &v2api.CiliumNode{
 				ObjectMeta: metaV1.ObjectMeta{
 					Name: "Test Node",
@@ -167,38 +284,38 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			testBGPInstanceConfig: &v2alpha1.CiliumBGPNodeInstance{
 				Name:     "bgp-65001",
 				LocalASN: ptr.To[int64](65001),
-				Peers: []v2alpha1.CiliumBGPNodePeer{
-					{
-						Name: "red-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-red",
-						},
+				Peers:    []v2alpha1.CiliumBGPNodePeer{redPeer65001, bluePeer65001},
+			},
+			expectedPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{
+				{Name: redPoolName, Namespace: redPoolNamespace}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v4): struct{}{},
+						string(redPoolNodePrefix2v4): struct{}{},
 					},
-					{
-						Name: "blue-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-blue",
-						},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v6): struct{}{},
+						string(redPoolNodePrefix2v6): struct{}{},
+					},
+				},
+				{Name: bluePoolName, Namespace: bluePoolNamespace}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						string(bluePoolNodePrefix1v4): struct{}{},
+						string(bluePoolNodePrefix2v4): struct{}{},
+					},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						string(bluePoolNodePrefix1v6): struct{}{},
+						string(bluePoolNodePrefix2v6): struct{}{},
 					},
 				},
 			},
-
-			expectedAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v4):  struct{}{},
-					string(redPoolNodePrefix2v4):  struct{}{},
-					string(bluePoolNodePrefix1v4): struct{}{},
-					string(bluePoolNodePrefix2v4): struct{}{},
+			expectedRPs: ResourceRoutePolicyMap{
+				resource.Key{Name: redPoolName, Namespace: redPoolNamespace}: RoutePolicyMap{
+					redPeer65001v4PodIPPoolRPName: redPeer65001v4PodIPPoolRP,
+					redPeer65001v6PodIPPoolRPName: redPeer65001v6PodIPPoolRP,
 				},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v6):  struct{}{},
-					string(redPoolNodePrefix2v6):  struct{}{},
-					string(bluePoolNodePrefix1v6): struct{}{},
-					string(bluePoolNodePrefix2v6): struct{}{},
+				resource.Key{Name: bluePoolName, Namespace: bluePoolNamespace}: RoutePolicyMap{
+					bluePeer65001v4PodIPPoolRPName: bluePeer65001v4PodIPPoolRP,
+					bluePeer65001v6PodIPPoolRPName: bluePeer65001v6PodIPPoolRP,
 				},
 			},
 		},
@@ -216,7 +333,8 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 				redPool,
 				bluePool,
 			},
-			preconfiguredAdverts: map[types.Family]map[string]struct{}{},
+			preconfiguredPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
+			preconfiguredRPs:         ResourceRoutePolicyMap{},
 			testCiliumNode: &v2api.CiliumNode{
 				ObjectMeta: metaV1.ObjectMeta{
 					Name: "Test Node",
@@ -252,38 +370,38 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			testBGPInstanceConfig: &v2alpha1.CiliumBGPNodeInstance{
 				Name:     "bgp-65001",
 				LocalASN: ptr.To[int64](65001),
-				Peers: []v2alpha1.CiliumBGPNodePeer{
-					{
-						Name: "red-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-red",
-						},
+				Peers:    []v2alpha1.CiliumBGPNodePeer{redPeer65001, bluePeer65001},
+			},
+			expectedPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{
+				{Name: redPoolName, Namespace: redPoolNamespace}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v4): struct{}{},
+						string(redPoolNodePrefix2v4): struct{}{},
 					},
-					{
-						Name: "blue-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-blue",
-						},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v6): struct{}{},
+						string(redPoolNodePrefix2v6): struct{}{},
+					},
+				},
+				{Name: bluePoolName, Namespace: bluePoolNamespace}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						string(bluePoolNodePrefix1v4): struct{}{},
+						string(bluePoolNodePrefix2v4): struct{}{},
+					},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						string(bluePoolNodePrefix1v6): struct{}{},
+						string(bluePoolNodePrefix2v6): struct{}{},
 					},
 				},
 			},
-
-			expectedAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v4):  struct{}{},
-					string(redPoolNodePrefix2v4):  struct{}{},
-					string(bluePoolNodePrefix1v4): struct{}{},
-					string(bluePoolNodePrefix2v4): struct{}{},
+			expectedRPs: ResourceRoutePolicyMap{
+				resource.Key{Name: redPoolName, Namespace: redPoolNamespace}: RoutePolicyMap{
+					redPeer65001v4PodIPPoolRPName: redPeer65001v4PodIPPoolRP,
+					redPeer65001v6PodIPPoolRPName: redPeer65001v6PodIPPoolRP,
 				},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v6):  struct{}{},
-					string(redPoolNodePrefix2v6):  struct{}{},
-					string(bluePoolNodePrefix1v6): struct{}{},
-					string(bluePoolNodePrefix2v6): struct{}{},
+				resource.Key{Name: bluePoolName, Namespace: bluePoolNamespace}: RoutePolicyMap{
+					bluePeer65001v4PodIPPoolRPName: bluePeer65001v4PodIPPoolRP,
+					bluePeer65001v6PodIPPoolRPName: bluePeer65001v6PodIPPoolRP,
 				},
 			},
 		},
@@ -301,7 +419,7 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 				redPool,
 				bluePool,
 			},
-			preconfiguredAdverts: map[types.Family]map[string]struct{}{},
+			preconfiguredPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
 			testCiliumNode: &v2api.CiliumNode{
 				ObjectMeta: metaV1.ObjectMeta{
 					Name: "Test Node",
@@ -333,34 +451,13 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 					},
 				},
 			},
-
 			testBGPInstanceConfig: &v2alpha1.CiliumBGPNodeInstance{
 				Name:     "bgp-65001",
 				LocalASN: ptr.To[int64](65001),
-				Peers: []v2alpha1.CiliumBGPNodePeer{
-					{
-						Name: "red-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-red",
-						},
-					},
-					{
-						Name: "blue-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-blue",
-						},
-					},
-				},
+				Peers:    []v2alpha1.CiliumBGPNodePeer{redPeer65001, bluePeer65001},
 			},
-
-			expectedAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {},
-			},
+			expectedPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
+			expectedRPs:         nil,
 		},
 		{
 			name: "dual stack, pool selected by advertisement, pool NOT present on the node",
@@ -376,7 +473,7 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 				redPool,
 				bluePool,
 			},
-			preconfiguredAdverts: map[types.Family]map[string]struct{}{},
+			preconfiguredPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
 			testCiliumNode: &v2api.CiliumNode{
 				ObjectMeta: metaV1.ObjectMeta{
 					Name: "Test Node",
@@ -402,30 +499,10 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			testBGPInstanceConfig: &v2alpha1.CiliumBGPNodeInstance{
 				Name:     "bgp-65001",
 				LocalASN: ptr.To[int64](65001),
-				Peers: []v2alpha1.CiliumBGPNodePeer{
-					{
-						Name: "red-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-red",
-						},
-					},
-					{
-						Name: "blue-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-blue",
-						},
-					},
-				},
+				Peers:    []v2alpha1.CiliumBGPNodePeer{redPeer65001, bluePeer65001},
 			},
-
-			expectedAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {},
-			},
+			expectedPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{},
+			expectedRPs:         nil,
 		},
 		{
 			name: "dual stack, clean up of preconfigured advertisements",
@@ -435,20 +512,30 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redAdvertWithSelector(&redLabelSelector),
-				blueAdvertWithSelector(&blueLabelSelector),
 			},
 			pools: []*v2alpha1.CiliumPodIPPool{
 				redPool,
-				bluePool,
 			},
-			preconfiguredAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
-					"10.10.1.0/24": struct{}{},
-					"10.10.2.0/24": struct{}{},
+			preconfiguredPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{
+				{Name: "unknown", Namespace: "default"}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						"10.10.1.0/24": struct{}{},
+						"10.10.2.0/24": struct{}{},
+					},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						"2001:db8:100:0:1234::/96": struct{}{},
+						"2001:db8:101:0:1234::/96": struct{}{},
+					},
 				},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
-					"2001:db8:100:0:1234::/96": struct{}{},
-					"2001:db8:101:0:1234::/96": struct{}{},
+			},
+			preconfiguredRPs: ResourceRoutePolicyMap{
+				resource.Key{Name: redPoolName, Namespace: redPoolNamespace}: RoutePolicyMap{
+					redPeer65001v4PodIPPoolRPName: redPeer65001v4PodIPPoolRP,
+					redPeer65001v6PodIPPoolRPName: redPeer65001v6PodIPPoolRP,
+				},
+				resource.Key{Name: bluePoolName, Namespace: bluePoolNamespace}: RoutePolicyMap{
+					bluePeer65001v4PodIPPoolRPName: bluePeer65001v4PodIPPoolRP,
+					bluePeer65001v6PodIPPoolRPName: bluePeer65001v6PodIPPoolRP,
 				},
 			},
 			testCiliumNode: &v2api.CiliumNode{
@@ -468,15 +555,6 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 										redPoolNodePrefix2v6,
 									},
 								},
-								{
-									Pool: bluePoolName,
-									CIDRs: []ipamtypes.IPAMPodCIDR{
-										bluePoolNodePrefix1v4,
-										bluePoolNodePrefix2v4,
-										bluePoolNodePrefix1v6,
-										bluePoolNodePrefix2v6,
-									},
-								},
 							},
 						},
 					},
@@ -486,38 +564,24 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			testBGPInstanceConfig: &v2alpha1.CiliumBGPNodeInstance{
 				Name:     "bgp-65001",
 				LocalASN: ptr.To[int64](65001),
-				Peers: []v2alpha1.CiliumBGPNodePeer{
-					{
-						Name: "red-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-red",
-						},
+				Peers:    []v2alpha1.CiliumBGPNodePeer{redPeer65001, bluePeer65001},
+			},
+			expectedPoolAFPaths: map[resource.Key]map[types.Family]map[string]struct{}{
+				{Name: redPoolName, Namespace: redPoolNamespace}: {
+					{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v4): struct{}{},
+						string(redPoolNodePrefix2v4): struct{}{},
 					},
-					{
-						Name: "blue-peer-65001",
-						PeerConfigRef: &v2alpha1.PeerConfigReference{
-							Group: "cilium.io",
-							Kind:  "CiliumBGPPeerConfig",
-							Name:  "peer-config-blue",
-						},
+					{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+						string(redPoolNodePrefix1v6): struct{}{},
+						string(redPoolNodePrefix2v6): struct{}{},
 					},
 				},
 			},
-
-			expectedAdverts: map[types.Family]map[string]struct{}{
-				{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v4):  struct{}{},
-					string(redPoolNodePrefix2v4):  struct{}{},
-					string(bluePoolNodePrefix1v4): struct{}{},
-					string(bluePoolNodePrefix2v4): struct{}{},
-				},
-				{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
-					string(redPoolNodePrefix1v6):  struct{}{},
-					string(redPoolNodePrefix2v6):  struct{}{},
-					string(bluePoolNodePrefix1v6): struct{}{},
-					string(bluePoolNodePrefix2v6): struct{}{},
+			expectedRPs: ResourceRoutePolicyMap{
+				resource.Key{Name: redPoolName, Namespace: redPoolNamespace}: RoutePolicyMap{
+					redPeer65001v4PodIPPoolRPName: redPeer65001v4PodIPPoolRP,
+					redPeer65001v6PodIPPoolRPName: redPeer65001v6PodIPPoolRP,
 				},
 			},
 		},
@@ -542,17 +606,23 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			testBGPInstance := instance.NewFakeBGPInstance()
 
 			// set the preconfigured advertisements
-			presetAdverts := make(AFPathsMap)
-			for preAdvertFam, preAdverts := range tt.preconfiguredAdverts {
-				pathSet := make(map[string]*types.Path)
-				for preAdvert := range preAdverts {
-					path := types.NewPathForPrefix(netip.MustParsePrefix(preAdvert))
-					path.Family = preAdvertFam
-					pathSet[preAdvert] = path
+			presetPoolAFPaths := make(ResourceAFPathsMap)
+			for pool, prePoolAFPaths := range tt.preconfiguredPoolAFPaths {
+				presetPoolAFPaths[pool] = make(AFPathsMap)
+				for fam, afPaths := range prePoolAFPaths {
+					pathSet := make(PathMap)
+					for prePath := range afPaths {
+						path := types.NewPathForPrefix(netip.MustParsePrefix(prePath))
+						path.Family = fam
+						pathSet[prePath] = path
+					}
+					presetPoolAFPaths[pool][fam] = pathSet
 				}
-				presetAdverts[preAdvertFam] = pathSet
 			}
-			podIPPoolReconciler.setMetadata(testBGPInstance, PodIPPoolReconcilerMetadata{presetAdverts})
+			podIPPoolReconciler.setMetadata(testBGPInstance, PodIPPoolReconcilerMetadata{
+				PoolAFPaths:       presetPoolAFPaths,
+				PoolRoutePolicies: tt.preconfiguredRPs,
+			})
 
 			// run podIPPoolReconciler twice to ensure idempotency
 			for i := 0; i < 2; i++ {
@@ -565,16 +635,20 @@ func Test_PodIPPoolAdvertisements(t *testing.T) {
 			}
 
 			// check if the advertisements are as expected
-			runningFamilyPaths := make(map[types.Family]map[string]struct{})
-			for family, paths := range podIPPoolReconciler.getMetadata(testBGPInstance).AFPaths {
-				pathSet := make(map[string]struct{})
-				for pathKey := range paths {
-					pathSet[pathKey] = struct{}{}
+			runningPoolAFPaths := make(map[resource.Key]map[types.Family]map[string]struct{})
+			for pool, poolAFPaths := range podIPPoolReconciler.getMetadata(testBGPInstance).PoolAFPaths {
+				runningPoolAFPaths[pool] = make(map[types.Family]map[string]struct{})
+				for fam, afPaths := range poolAFPaths {
+					pathSet := make(map[string]struct{})
+					for pathKey := range afPaths {
+						pathSet[pathKey] = struct{}{}
+					}
+					runningPoolAFPaths[pool][fam] = pathSet
 				}
-				runningFamilyPaths[family] = pathSet
 			}
 
-			req.Equal(tt.expectedAdverts, runningFamilyPaths)
+			req.Equal(tt.expectedPoolAFPaths, runningPoolAFPaths)
+			req.Equal(tt.expectedRPs, podIPPoolReconciler.getMetadata(testBGPInstance).PoolRoutePolicies)
 		})
 	}
 }

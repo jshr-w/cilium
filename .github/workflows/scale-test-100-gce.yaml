@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '39 0 * * 1-5'
 
+# For testing uncomment following lines:
+#  push:
+#    branches:
+#      - your_branch_name
+
 permissions:
   # To be able to access the repository with actions/checkout
   contents: read
@@ -31,11 +36,13 @@ concurrency:
 
 env:
   # renovate: datasource=golang-version depName=go
-  go_version: 1.22.2
+  go_version: 1.22.4
   # Adding k8s.local to the end makes kops happy-
   # has stricter DNS naming requirements.
   test_name: scale-100
   cluster_base_name: ${{ github.run_id }}-${{ github.run_attempt }}.k8s.local
+  # renovate: datasource=docker depName=google/cloud-sdk
+  gcloud_version: 478.0.0
 
 jobs:
   install-and-scaletest:
@@ -44,7 +51,7 @@ jobs:
     timeout-minutes: 150
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -52,21 +59,37 @@ jobs:
       - name: Set Environment Variables
         uses: ./.github/actions/set-env-variables
 
-      - name: Get Cilium's default values
-        id: default_vars
-        uses: ./.github/actions/helm-default
-        with:
-          image-tag: ${{ github.sha }}
-
       - name: Set up job variables
         id: vars
         run: |
-          SHA="${{ github.sha }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] ; then
+            SHA="${{ inputs.image-tag }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
 
-          # Setup Cilium install options
-          CILIUM_INSTALL_DEFAULTS="${{ steps.default_vars.outputs.cilium_install_defaults }} \
+          CILIUM_INSTALL_DEFAULTS="--chart-directory=install/kubernetes/cilium \
             --set pprof.enabled=true \
+            --helm-set=prometheus.enabled=true \
             --wait=false"
+
+          # only add SHA to the image tags if it was set
+          if [ -n "${SHA}" ]; then
+            echo sha=${SHA} >> $GITHUB_OUTPUT
+            CILIUM_INSTALL_DEFAULTS+=" --helm-set=image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-ci \
+            --helm-set=image.useDigest=false \
+            --helm-set=image.tag=${SHA} \
+            --helm-set=operator.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/operator \
+            --helm-set=operator.image.suffix=-ci \
+            --helm-set=operator.image.tag=${SHA} \
+            --helm-set=operator.image.useDigest=false \
+            --helm-set=clustermesh.apiserver.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/clustermesh-apiserver-ci \
+            --helm-set=clustermesh.apiserver.image.tag=${SHA} \
+            --helm-set=clustermesh.apiserver.image.useDigest=false \
+            --helm-set=hubble.relay.image.repository=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/hubble-relay-ci \
+            --helm-set=hubble.relay.image.tag=${SHA} \
+            --helm-set=hubble.relay.image.useDigest=false"
+          fi
 
           CLUSTER_NAME="${{ env.test_name }}-${{ env.cluster_base_name }}"
 
@@ -83,12 +106,12 @@ jobs:
           done
 
       - name: Install Go
-        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7 # v5.0.1
         with:
           go-version: ${{ env.go_version }}
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@a9579d1afc528b085930c5237a69ee77b2c2be76 # v0.16.4
+        uses: cilium/cilium-cli@d86ae1ca5755139d6ca9423b9606cb047fc8e00f # v0.16.9
         with:
           repository: ${{ env.CILIUM_CLI_RELEASE_REPO }}
           release-version: ${{ env.CILIUM_CLI_VERSION }}
@@ -97,7 +120,7 @@ jobs:
         uses: cilium/scale-tests-action/install-kops@238d773bd07754bfd693a6b22c94eddf3a12778d # main
 
       - name: Setup gcloud credentials
-        uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        uses: google-github-actions/auth@71fee32a0bb7e97b4d33d548e7d957010649d8fa # v2.1.3
         with:
           workload_identity_provider: ${{ secrets.GCP_PERF_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_PERF_SA }}
@@ -108,10 +131,10 @@ jobs:
         uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: ${{ secrets.GCP_PERF_PROJECT_ID }}
-          version: "405.0.0"
+          version: ${{ env.gcloud_version }}
 
       - name: Clone ClusterLoader2
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           repository: kubernetes/perf-tests
           # Avoid using renovate to update this dependency because: (1)
@@ -119,7 +142,7 @@ jobs:
           # all updates to the default branch and (2) continually
           # updating CL2 may impact the stability of the scale test
           # results.
-          ref: 920c39ef245a81bd8fb39d7fecf39eb35820d9ef
+          ref: 6eb52ac89d5de15a0ad13cfeb2b2026e57ce4f64
           persist-credentials: false
           sparse-checkout: clusterloader2
           path: perf-tests
@@ -165,6 +188,7 @@ jobs:
 
       - name: Install Cilium
         run: |
+          cilium install --dry-run-helm-values ${{ steps.vars.outputs.cilium_install_defaults }}
           cilium install ${{ steps.vars.outputs.cilium_install_defaults }}
 
       - name: Wait for cluster to be ready
@@ -182,7 +206,7 @@ jobs:
         id: run-cl2
         working-directory: ./perf-tests/clusterloader2
         shell: bash
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           mkdir ./report
           export CL2_PROMETHEUS_PVC_ENABLED=false
@@ -190,12 +214,16 @@ jobs:
           export CL2_ENABLE_NETWORKPOLICIES=true
           export CL2_ALLOWED_SLOW_API_CALLS=1
           export CL2_SCHEDULER_THROUGHPUT_THRESHOLD=0
+          export CL2_PROMETHEUS_SCRAPE_CILIUM_OPERATOR=true
+          export CL2_PROMETHEUS_SCRAPE_CILIUM_AGENT=true
+          export CL2_PROMETHEUS_MEMORY_SCALE_FACTOR=2.0
 
           # CL2 hardcodes module paths to live in ./testing/load, even
           # if the path given is relative.
           cp ../../.github/actions/cl2-modules/cilium-agent-pprofs.yaml ./testing/load/
+          cp ../../.github/actions/cl2-modules/cilium-metrics.yaml ./testing/load/
           echo \
-            '{"CL2_ADDITIONAL_MEASUREMENT_MODULES": ["./cilium-agent-pprofs.yaml"]}' \
+            '{"CL2_ADDITIONAL_MEASUREMENT_MODULES": ["./cilium-agent-pprofs.yaml", "./cilium-metrics.yaml"]}' \
             > modules.yaml
 
           # CL2 needs ssh access to control plane nodes

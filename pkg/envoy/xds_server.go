@@ -21,6 +21,7 @@ import (
 	envoy_config_listener "github.com/cilium/proxy/go/envoy/config/listener/v3"
 	envoy_config_route "github.com/cilium/proxy/go/envoy/config/route/v3"
 	envoy_extensions_filters_http_router_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/http/router/v3"
+	envoy_upstream_codec "github.com/cilium/proxy/go/envoy/extensions/filters/http/upstream_codec/v3"
 	envoy_extensions_listener_tls_inspector_v3 "github.com/cilium/proxy/go/envoy/extensions/filters/listener/tls_inspector/v3"
 	envoy_config_http "github.com/cilium/proxy/go/envoy/extensions/filters/network/http_connection_manager/v3"
 	envoy_mongo_proxy "github.com/cilium/proxy/go/envoy/extensions/filters/network/mongo_proxy/v3"
@@ -201,15 +202,17 @@ func toAny(pb proto.Message) *anypb.Any {
 }
 
 type xdsServerConfig struct {
-	envoySocketDir     string
-	proxyGID           int
-	httpRequestTimeout int
-	httpIdleTimeout    int
-	httpMaxGRPCTimeout int
-	httpRetryCount     int
-	httpRetryTimeout   int
-	httpNormalizePath  bool
-	useFullTLSContext  bool
+	envoySocketDir                string
+	proxyGID                      int
+	httpRequestTimeout            int
+	httpIdleTimeout               int
+	httpMaxGRPCTimeout            int
+	httpRetryCount                int
+	httpRetryTimeout              int
+	httpNormalizePath             bool
+	useFullTLSContext             bool
+	proxyXffNumTrustedHopsIngress uint32
+	proxyXffNumTrustedHopsEgress  uint32
 }
 
 // newXDSServer creates a new xDS GRPC server.
@@ -349,17 +352,32 @@ func GetCiliumHttpFilter() *envoy_config_http.HttpFilter {
 	}
 }
 
-func (s *xdsServer) getHttpFilterChainProto(clusterName string, tls bool) *envoy_config_listener.FilterChain {
+func GetUpstreamCodecFilter() *envoy_config_http.HttpFilter {
+	return &envoy_config_http.HttpFilter{
+		Name: "envoy.filters.http.upstream_codec",
+		ConfigType: &envoy_config_http.HttpFilter_TypedConfig{
+			TypedConfig: toAny(&envoy_upstream_codec.UpstreamCodec{}),
+		},
+	}
+}
+
+func (s *xdsServer) getHttpFilterChainProto(clusterName string, tls bool, isIngress bool) *envoy_config_listener.FilterChain {
+
 	requestTimeout := int64(s.config.httpRequestTimeout) // seconds
 	idleTimeout := int64(s.config.httpIdleTimeout)       // seconds
 	maxGRPCTimeout := int64(s.config.httpMaxGRPCTimeout) // seconds
 	numRetries := uint32(s.config.httpRetryCount)
 	retryTimeout := int64(s.config.httpRetryTimeout) // seconds
+	xffNumTrustedHops := s.config.proxyXffNumTrustedHopsEgress
+	if isIngress {
+		xffNumTrustedHops = s.config.proxyXffNumTrustedHopsIngress
+	}
 
 	hcmConfig := &envoy_config_http.HttpConnectionManager{
-		StatPrefix:       "proxy",
-		UseRemoteAddress: &wrapperspb.BoolValue{Value: true},
-		SkipXffAppend:    true,
+		StatPrefix:        "proxy",
+		UseRemoteAddress:  &wrapperspb.BoolValue{Value: true},
+		SkipXffAppend:     true,
+		XffNumTrustedHops: xffNumTrustedHops,
 		HttpFilters: []*envoy_config_http.HttpFilter{
 			GetCiliumHttpFilter(),
 			{
@@ -933,10 +951,10 @@ func (s *xdsServer) getListenerConf(name string, kind policy.L7ParserType, port 
 
 	// Add filter chains
 	if kind == policy.ParserTypeHTTP {
-		listenerConf.FilterChains = append(listenerConf.FilterChains, s.getHttpFilterChainProto(clusterName, false))
+		listenerConf.FilterChains = append(listenerConf.FilterChains, s.getHttpFilterChainProto(clusterName, false, isIngress))
 
 		// Add a TLS variant
-		listenerConf.FilterChains = append(listenerConf.FilterChains, s.getHttpFilterChainProto(tlsClusterName, true))
+		listenerConf.FilterChains = append(listenerConf.FilterChains, s.getHttpFilterChainProto(tlsClusterName, true, isIngress))
 	} else {
 		// Default TCP chain, takes care of all parsers in proxylib
 		listenerConf.FilterChains = append(listenerConf.FilterChains, s.getTcpFilterChainProto(clusterName, "", nil, false))
@@ -1589,7 +1607,7 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 			continue
 		}
 
-		port := uint16(l4.Port)
+		port := l4.Port
 		if port == 0 && l4.PortName != "" {
 			port = ep.GetNamedPort(l4.Ingress, l4.PortName, uint8(l4.U8Proto))
 			if port == 0 {

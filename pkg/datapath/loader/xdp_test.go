@@ -25,9 +25,6 @@ func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 	ns := netns.NewNetNS(t)
 
 	ns.Do(func() error {
-		// create netlink handle in the test netns to ensure subsequent netlink
-		// calls request data from the correct netns, even if called in a separate
-		// goroutine (require.Eventually)
 		h, err := netlink.NewHandle()
 		require.NoError(t, err)
 
@@ -58,18 +55,18 @@ func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 		err = attachXDPProgram(veth1, prog, symbolFromHostNetdevXDP, veth1LinkPath, link.XDPDriverMode)
 		require.NoError(t, err)
 
-		NewLoaderForTest(t).maybeUnloadObsoleteXDPPrograms(
+		newTestLoader(t).maybeUnloadObsoleteXDPPrograms(
 			[]string{"veth0"}, option.XDPModeLinkDriver, basePath,
 		)
 
-		require.Eventually(t, func() bool {
+		require.NoError(t, testutils.WaitUntil(func() bool {
 			v1, err := h.LinkByName("veth1")
 			require.NoError(t, err)
 			if v1.Attrs().Xdp != nil {
 				return v1.Attrs().Xdp.Attached == false
 			}
 			return true
-		}, 150*time.Millisecond, 15*time.Millisecond)
+		}, time.Second))
 
 		v0, err := h.LinkByName("veth0")
 		require.NoError(t, err)
@@ -186,7 +183,7 @@ func TestAttachXDPWithExistingLink(t *testing.T) {
 		require.NoError(t, err)
 
 		// Detach the program.
-		err = NewLoaderForTest(t).DetachXDP(veth, basePath, "test")
+		err = newTestLoader(t).DetachXDP(veth.Attrs().Name, basePath, "test")
 		require.NoError(t, err)
 
 		err = netlink.LinkDel(veth)
@@ -217,11 +214,11 @@ func TestDetachXDPWithPreviousAttach(t *testing.T) {
 		require.True(t, getLink(t, veth).Attrs().Xdp.Attached)
 
 		// Detach with the wrong name, leaving the program attached.
-		err = NewLoaderForTest(t).DetachXDP(veth, basePath, "foo")
+		err = newTestLoader(t).DetachXDP(veth.Attrs().Name, basePath, "foo")
 		require.NoError(t, err)
 		require.True(t, getLink(t, veth).Attrs().Xdp.Attached)
 
-		err = NewLoaderForTest(t).DetachXDP(veth, basePath, "test")
+		err = newTestLoader(t).DetachXDP(veth.Attrs().Name, basePath, "test")
 		require.NoError(t, err)
 		require.False(t, getLink(t, veth).Attrs().Xdp.Attached)
 

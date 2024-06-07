@@ -15,9 +15,12 @@ import (
 	envoy_config_endpoint "github.com/cilium/proxy/go/envoy/config/endpoint/v3"
 	envoy_config_listener "github.com/cilium/proxy/go/envoy/config/listener/v3"
 	envoy_config_route "github.com/cilium/proxy/go/envoy/config/route/v3"
+	envoy_config_healthcheck "github.com/cilium/proxy/go/envoy/extensions/filters/http/health_check/v3"
 	envoy_config_http "github.com/cilium/proxy/go/envoy/extensions/filters/network/http_connection_manager/v3"
 	envoy_config_tcp "github.com/cilium/proxy/go/envoy/extensions/filters/network/tcp_proxy/v3"
 	envoy_config_tls "github.com/cilium/proxy/go/envoy/extensions/transport_sockets/tls/v3"
+	envoy_config_upstream "github.com/cilium/proxy/go/envoy/extensions/upstreams/http/v3"
+	envoy_config_types "github.com/cilium/proxy/go/envoy/type/v3"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -38,6 +41,13 @@ const (
 	ciliumNetworkFilterName             = "cilium.network"
 	ciliumL7FilterName                  = "cilium.l7policy"
 	envoyRouterFilterName               = "envoy.filters.http.router"
+
+	httpProtocolOptionsType = "envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+
+	upstreamCodecFilterTypeURL   = "type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec"
+	quicUpstreamTransportTypeURL = "type.googleapis.com/envoy.extensions.transport_sockets.quic.v3.QuicUpstreamTransport"
+	upstreamTlsContextTypeURL    = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext"
+	ciliumL7FilterTypeURL        = "type.googleapis.com/cilium.L7Policy"
 )
 
 type cecResourceParser struct {
@@ -112,6 +122,10 @@ type PortAllocator interface {
 func (r *cecResourceParser) parseResources(cecNamespace string, cecName string, xdsResources []cilium_v2.XDSResource, isL7LB bool, useOriginalSourceAddr bool, newResources bool) (envoy.Resources, error) {
 	// only validate new  resources - old ones are already applied
 	validate := newResources
+
+	// upstream filters are injected if any non-internal listener is L7 LB
+	// and downstream filters were injected.
+	injectCiliumUpstreamFilters := false
 
 	resources := envoy.Resources{}
 	for _, res := range xdsResources {
@@ -194,7 +208,17 @@ func (r *cecResourceParser) parseResources(cecNamespace string, cecName string, 
 						if injectCiliumFilters {
 							l7FilterUpdated := injectCiliumL7Filter(hcmConfig)
 							updated = updated || l7FilterUpdated
+
+							// Also inject upstream filters for L7 LB when injecting the downstream
+							// HTTP enforcement filter
+							if isL7LB {
+								injectCiliumUpstreamFilters = true
+							}
 						}
+
+						httpFiltersUpdated := qualifyHttpFilters(cecNamespace, cecName, hcmConfig)
+						updated = updated || httpFiltersUpdated
+
 						if updated {
 							filter.ConfigType = &envoy_config_listener.Filter_TypedConfig{
 								TypedConfig: toAny(hcmConfig),
@@ -424,6 +448,50 @@ func (r *cecResourceParser) parseResources(cecNamespace string, cecName string, 
 		}
 	}
 
+	if injectCiliumUpstreamFilters {
+		for _, cluster := range resources.Clusters {
+			opts := &envoy_config_upstream.HttpProtocolOptions{}
+
+			if cluster.TypedExtensionProtocolOptions == nil {
+				cluster.TypedExtensionProtocolOptions = make(map[string]*anypb.Any)
+			}
+
+			a := cluster.TypedExtensionProtocolOptions[httpProtocolOptionsType]
+			if a != nil {
+				if err := a.UnmarshalTo(opts); err != nil {
+					return envoy.Resources{}, fmt.Errorf("failed to unmarshal HttpProtocolOptions: %w", err)
+				}
+			}
+
+			// Figure out if upstream supports ALPN so that we can add missing upstream
+			// protocol config
+			supportsALPN := false
+			ts := cluster.GetTransportSocket()
+			if ts != nil {
+				tc := ts.GetTypedConfig()
+				if tc == nil {
+					return envoy.Resources{}, fmt.Errorf("Transport socket has no type: %s", ts.String())
+				}
+				switch tc.GetTypeUrl() {
+				case upstreamTlsContextTypeURL, quicUpstreamTransportTypeURL:
+					supportsALPN = true
+				}
+			}
+			injected, err := injectCiliumUpstreamL7Filter(opts, supportsALPN)
+			if err != nil {
+				return envoy.Resources{}, fmt.Errorf("failed to inject upstream filters for cluster %q: %w", cluster.Name, err)
+			}
+			if injected {
+				cluster.TypedExtensionProtocolOptions[httpProtocolOptionsType] = toAny(opts)
+				if validate {
+					if err := cluster.Validate(); err != nil {
+						return envoy.Resources{}, fmt.Errorf("failed to validate Cluster %q after injecting Cilium upstream filters (%s): %w", cluster.Name, cluster.String(), err)
+					}
+				}
+			}
+		}
+	}
+
 	return resources, nil
 }
 
@@ -551,6 +619,117 @@ func injectCiliumL7Filter(hcmConfig *envoy_config_http.HttpConnectionManager) bo
 	}
 
 	return false
+}
+
+func qualifyHttpFilters(cecNamespace string, cecName string, hcmConfig *envoy_config_http.HttpConnectionManager) bool {
+	updated := false
+
+	for _, httpFilter := range hcmConfig.HttpFilters {
+		switch h := httpFilter.ConfigType.(type) {
+		case *envoy_config_http.HttpFilter_TypedConfig:
+			any, err := h.TypedConfig.UnmarshalNew()
+			if err != nil {
+				continue
+			}
+
+			switch httpFilterConfig := any.(type) {
+			case *envoy_config_healthcheck.HealthCheck:
+				clusters := map[string]*envoy_config_types.Percent{}
+				for c, p := range httpFilterConfig.ClusterMinHealthyPercentages {
+					clusterName := c
+					updatedClusterName, nameUpdated := api.ResourceQualifiedName(cecNamespace, cecName, c)
+					if nameUpdated {
+						updated = true
+						clusterName = updatedClusterName
+					}
+
+					clusters[clusterName] = p
+				}
+
+				if updated {
+					httpFilterConfig.ClusterMinHealthyPercentages = clusters
+					h.TypedConfig = toAny(httpFilterConfig)
+				}
+			}
+		}
+	}
+
+	return updated
+}
+
+// injectCiliumUpstreamL7Filter injects the Cilium HTTP filter just before the Upstream Codec filter
+func injectCiliumUpstreamL7Filter(opts *envoy_config_upstream.HttpProtocolOptions, supportsALPN bool) (bool, error) {
+	filters := opts.GetHttpFilters()
+	if filters == nil {
+		filters = make([]*envoy_config_http.HttpFilter, 0, 2)
+	}
+
+	foundCiliumL7Filter := false
+	codecFilterIndex := -1
+	for j, filter := range filters {
+		// no filters allowed after upstream codec filter
+		if codecFilterIndex >= 0 {
+			return false, fmt.Errorf("filter after codec filter: %s", filter.String())
+		}
+		if len(filter.Name) == 0 {
+			return false, fmt.Errorf("filter has no name: %s", filter.String())
+		}
+		tc := filter.GetTypedConfig()
+		if tc == nil {
+			return false, fmt.Errorf("filter has no type: %s", filter.String())
+		}
+		switch tc.GetTypeUrl() {
+		case ciliumL7FilterTypeURL:
+			foundCiliumL7Filter = true
+		case upstreamCodecFilterTypeURL:
+			codecFilterIndex = j
+		}
+	}
+	changed := false
+	if !foundCiliumL7Filter {
+		j := codecFilterIndex
+		if j >= 0 {
+			filters = append(filters[:j+1], filters[j:]...)
+			filters[j] = envoy.GetCiliumHttpFilter()
+		} else {
+			filters = append(filters, envoy.GetCiliumHttpFilter())
+		}
+		changed = true
+	}
+
+	// Add CodecFilter if missing
+	if codecFilterIndex < 0 {
+		filters = append(filters, envoy.GetUpstreamCodecFilter())
+		changed = true
+	}
+
+	if changed {
+		opts.HttpFilters = filters
+	}
+
+	// Add required HttpProtocolOptions fields
+	if opts.GetUpstreamProtocolOptions() == nil {
+		if supportsALPN {
+			// Use auto config for upstream transports that support ALPN
+			opts.UpstreamProtocolOptions = &envoy_config_upstream.HttpProtocolOptions_AutoConfig{
+				AutoConfig: &envoy_config_upstream.HttpProtocolOptions_AutoHttpConfig{},
+			}
+		} else {
+			// Use downstream protocol for upstream transports that do not support ALPN
+			opts.UpstreamProtocolOptions = &envoy_config_upstream.HttpProtocolOptions_UseDownstreamProtocolConfig{
+				UseDownstreamProtocolConfig: &envoy_config_upstream.HttpProtocolOptions_UseDownstreamHttpConfig{
+					Http2ProtocolOptions: &envoy_config_core.Http2ProtocolOptions{},
+				},
+			}
+		}
+		changed = true
+	}
+
+	if err := opts.Validate(); err != nil {
+		return false, fmt.Errorf("failed to validate HttpProtocolOptions after injecting Cilium upstream filters (%s): %w", opts.String(), err)
+	}
+
+	return changed, nil
 }
 
 func fillInTlsContextXDS(cecNamespace string, cecName string, tls *envoy_config_tls.CommonTlsContext) (updated bool) {

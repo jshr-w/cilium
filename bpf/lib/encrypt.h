@@ -14,6 +14,19 @@
 #include "lib/eps.h"
 #include "lib/vxlan.h"
 
+/* We cap key index at 4 bits because mark value is used to map ctx to key */
+#define MAX_KEY_INDEX 15
+
+#ifdef ENABLE_IPSEC
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, struct encrypt_config);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, 1);
+} ENCRYPT_MAP __section_maps_btf;
+#endif
+
 static __always_inline __u8 get_min_encrypt_key(__u8 peer_key __maybe_unused)
 {
 #ifdef ENABLE_IPSEC
@@ -171,7 +184,7 @@ do_decrypt(struct __ctx_buff *ctx, __u16 proto)
 			return CTX_ACT_OK;
 
 		if (!node_id)
-			return send_drop_notify_error(ctx, 0, DROP_NO_NODE_ID,
+			return send_drop_notify_error(ctx, UNKNOWN_ID, DROP_NO_NODE_ID,
 						      CTX_ACT_DROP,
 						      METRIC_INGRESS);
 		set_ipsec_decrypt_mark(ctx, node_id);

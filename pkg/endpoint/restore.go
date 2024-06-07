@@ -43,15 +43,6 @@ var (
 	initialGlobalIdentitiesControllerGroup = controller.NewGroup("initial-global-identities")
 )
 
-// hostObjFileName is the name of the host object file.
-const hostObjFileName = "bpf_host.o"
-
-func hasHostObjectFile(epDir string) bool {
-	hostObjFilepath := filepath.Join(epDir, hostObjFileName)
-	_, err := os.Stat(hostObjFilepath)
-	return err == nil
-}
-
 // ReadEPsFromDirNames returns a mapping of endpoint ID to endpoint of endpoints
 // from a list of directory names that can possible contain an endpoint.
 func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGetter policyRepoGetter,
@@ -75,7 +66,6 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 	possibleEPs := map[uint16]*Endpoint{}
 	for _, epDirName := range completeEPDirNames {
 		epDir := filepath.Join(basePath, epDirName)
-		isHost := hasHostObjectFile(epDir)
 
 		scopedLog := log.WithFields(logrus.Fields{
 			logfields.EndpointID: epDirName,
@@ -105,7 +95,7 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 
 		// We need to save the host endpoint ID as we'll need it to regenerate
 		// other endpoints.
-		if isHost {
+		if ep.IsHost() {
 			node.SetEndpointID(ep.GetID())
 		}
 	}
@@ -215,7 +205,7 @@ func (e *Endpoint) RegenerateAfterRestore(regenerator *Regenerator, bwm dptypes.
 
 	regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
 		Reason:            "syncing state to host",
-		RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
 	}
 	if buildSuccess := <-e.Regenerate(regenerationMetadata); !buildSuccess {
 		return fmt.Errorf("failed while regenerating endpoint")
@@ -410,6 +400,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		DNSZombies:               e.DNSZombies,
 		K8sPodName:               e.K8sPodName,
 		K8sNamespace:             e.K8sNamespace,
+		K8sUID:                   e.K8sUID,
 		DatapathConfiguration:    e.DatapathConfiguration,
 		CiliumEndpointUID:        e.ciliumEndpointUID,
 		Properties:               e.properties,
@@ -512,6 +503,9 @@ type serializableEndpoint struct {
 	// K8sNamespace is the Kubernetes namespace of the endpoint
 	K8sNamespace string
 
+	// K8sUID is the Kubernetes pod UID of the endpoint
+	K8sUID string
+
 	// DatapathConfiguration is the endpoint's datapath configuration as
 	// passed in via the plugin that created the endpoint, e.g. the CNI
 	// plugin which performed the plumbing will enable certain datapath
@@ -579,6 +573,7 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.DNSZombies = r.DNSZombies
 	ep.K8sPodName = r.K8sPodName
 	ep.K8sNamespace = r.K8sNamespace
+	ep.K8sUID = r.K8sUID
 	ep.DatapathConfiguration = r.DatapathConfiguration
 	ep.Options = r.Options
 	ep.ciliumEndpointUID = r.CiliumEndpointUID

@@ -29,19 +29,12 @@ import (
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/neighborsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
-	"github.com/cilium/cilium/pkg/maps/srv6map"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/maps/vtep"
 	"github.com/cilium/cilium/pkg/maps/worldcidrsmap"
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/option"
 )
-
-// LocalConfig returns the local configuration of the daemon's nodediscovery.
-func (d *Daemon) LocalConfig() *datapath.LocalNodeConfiguration {
-	d.nodeDiscovery.WaitForLocalNodeInit()
-	return &d.nodeDiscovery.LocalConfig
-}
 
 // listFilterIfs returns a map of interfaces based on the given filter.
 // The filter should take a link and, if found, return the index of that
@@ -162,10 +155,6 @@ func (d *Daemon) initMaps() error {
 		if err := tunnel.TunnelMap().Recreate(); err != nil {
 			return fmt.Errorf("initializing tunnel map: %w", err)
 		}
-	}
-
-	if option.Config.EnableSRv6 {
-		srv6map.CreateMaps()
 	}
 
 	if option.Config.EnableHighScaleIPcache {

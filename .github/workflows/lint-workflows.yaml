@@ -16,11 +16,11 @@ concurrency:
 
 jobs:
   ginkgo-workflow-comments:
-    name: Lint Ginko Workflows Comments
+    name: Lint Ginkgo Workflows Comments
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           persist-credentials: false
           # hard-code the path instead of using ${{ github.repository }} to make sure it works for forked repo as well
@@ -36,10 +36,10 @@ jobs:
 
       - name: Install Go
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
-        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7 # v5.0.1
         with:
           # renovate: datasource=golang-version depName=go
-          go-version: 1.22.2
+          go-version: 1.22.4
 
       - name: Build Ginkgo
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
@@ -138,7 +138,7 @@ jobs:
           fi
 
   ginkgo-schema-validation:
-    name: Validate Ginko Schema
+    name: Validate Ginkgo Schema
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -148,7 +148,7 @@ jobs:
       - name: Install yamela
         run: pip install yamale
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           persist-credentials: false
           # hard-code the path instead of using ${{ github.repository }} to make sure it works for forked repo as well
@@ -173,7 +173,7 @@ jobs:
       - name: Install yamela
         run: pip install yamale
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           persist-credentials: false
           # hard-code the path instead of using ${{ github.repository }} to make sure it works for forked repo as well
@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
           persist-credentials: false
           # hard-code the path instead of using ${{ github.repository }} to make sure it works for forked repo as well
@@ -222,6 +222,30 @@ jobs:
               echo Steps are missing name field, under these Jobs in file $FILE
               echo "${STEPS}" | awk '{for (i=1; i<=NF; i++) print "  " $i}'
               EXIT=1
+            fi
+          done
+          exit ${EXIT}
+
+      - name: Validate Commit Status Start Job
+        shell: bash
+        run: |
+          EXIT=0
+          cd src/github.com/cilium/cilium/.github/workflows
+          for FILE in *.yaml; do
+            # we only care about workflows that has ariane workflow_dispatch events
+            IS_ARIANE_DISPATCH=$(yq '.on.workflow_dispatch.inputs.PR-number' $FILE)
+            if [ "$IS_ARIANE_DISPATCH" == "null" ]; then
+                continue
+            fi
+            JOB=$(yq '.jobs | to_entries | .[] | select(.key == "commit-status-start")' $FILE)
+            if [ "$JOB" == "" ]; then
+                echo "commit-status-start job is missing in file $FILE"
+                EXIT=1
+            fi
+            JOB_NAME=$(echo "${JOB}" | yq '.value.name')
+            if [ "$JOB_NAME" != "Commit Status Start" ]; then
+                echo "commit-status-start job name must be set as 'Commit Status Start' in file $FILE"
+                EXIT=1
             fi
           done
           exit ${EXIT}

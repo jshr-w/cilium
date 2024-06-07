@@ -68,7 +68,7 @@ export KUBECTL ?= kubectl
 
 # Till the self-hosted renovate PR #30185 is merged, we might need to run the below
 # command locally for any version update.
-# make generate-api generate-health-api generate-hubble-api generate-operator-api
+# make generate-api generate-health-api generate-hubble-api generate-operator-api generate-kvstoremesh-api
 # renovate: datasource=docker depName=quay.io/goswagger/swagger
 SWAGGER_VERSION := v0.30.5
 SWAGGER := $(CONTAINER_ENGINE) run -u $(shell id -u):$(shell id -g) --rm -v $(ROOT_DIR):$(ROOT_DIR) -w $(ROOT_DIR) --entrypoint swagger quay.io/goswagger/swagger:$(SWAGGER_VERSION)
@@ -100,8 +100,8 @@ endif
 endif
 
 # renovate: datasource=docker depName=golangci/golangci-lint
-GOLANGCILINT_WANT_VERSION = v1.57.2
-GOLANGCILINT_IMAGE_SHA = sha256:8f3a60a00a83bb7d599d2e028ac0c3573dc2b9ec0842590f1c2e59781c821da7
+GOLANGCILINT_WANT_VERSION = v1.59.0
+GOLANGCILINT_IMAGE_SHA = sha256:8ad7dc3d98d77dec753f07408c7683ab854752a3eb8dc6a5e5f0728f9a89ae2c
 GOLANGCILINT_VERSION = $(shell golangci-lint version --format short 2>/dev/null)
 
 VERSION = $(shell cat $(dir $(lastword $(MAKEFILE_LIST)))/VERSION)

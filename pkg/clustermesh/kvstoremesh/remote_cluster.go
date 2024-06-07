@@ -12,6 +12,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/clustermesh/common"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
 	cmutils "github.com/cilium/cilium/pkg/clustermesh/utils"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
@@ -36,6 +38,9 @@ type remoteCluster struct {
 	identities reflector
 	ipcache    reflector
 
+	// status is the function which fills the common part of the status.
+	status common.StatusFunc
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
@@ -50,7 +55,7 @@ type remoteCluster struct {
 	logger logrus.FieldLogger
 }
 
-func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperations, srccfg *types.CiliumClusterConfig, ready chan<- error) {
+func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperations, srccfg types.CiliumClusterConfig, ready chan<- error) {
 	// Closing the synced.connected channel cancels the timeout goroutine.
 	// Ensure we do not attempt to close the channel more than once.
 	select {
@@ -60,37 +65,29 @@ func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperati
 	}
 
 	dstcfg := types.CiliumClusterConfig{
+		ID: srccfg.ID,
 		Capabilities: types.CiliumClusterConfigCapabilities{
-			SyncedCanaries: true,
-			Cached:         true,
+			SyncedCanaries:       true,
+			Cached:               true,
+			MaxConnectedClusters: srccfg.Capabilities.MaxConnectedClusters,
 		},
 	}
 
-	if srccfg != nil {
-		dstcfg.ID = srccfg.ID
-		dstcfg.Capabilities.MaxConnectedClusters = srccfg.Capabilities.MaxConnectedClusters
-	}
-
-	if err := cmutils.SetClusterConfig(ctx, rc.name, &dstcfg, rc.localBackend); err != nil {
+	if err := cmutils.SetClusterConfig(ctx, rc.name, dstcfg, rc.localBackend); err != nil {
 		ready <- fmt.Errorf("failed to propagate cluster configuration: %w", err)
 		close(ready)
 		return
 	}
 
-	var capabilities types.CiliumClusterConfigCapabilities
-	if srccfg != nil {
-		capabilities = srccfg.Capabilities
-	}
-
 	var mgr store.WatchStoreManager
-	if capabilities.SyncedCanaries {
+	if srccfg.Capabilities.SyncedCanaries {
 		mgr = rc.storeFactory.NewWatchStoreManager(backend, rc.name)
 	} else {
 		mgr = store.NewWatchStoreManagerImmediate(rc.name)
 	}
 
 	adapter := func(prefix string) string { return prefix }
-	if capabilities.Cached {
+	if srccfg.Capabilities.Cached {
 		adapter = kvstore.StateToCachePrefix
 	}
 
@@ -104,7 +101,7 @@ func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperati
 
 	mgr.Register(adapter(ipcache.IPIdentitiesPath), func(ctx context.Context) {
 		suffix := ipcache.DefaultAddressSpace
-		if capabilities.Cached {
+		if srccfg.Capabilities.Cached {
 			suffix = rc.name
 		}
 
@@ -113,7 +110,7 @@ func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperati
 
 	mgr.Register(adapter(identityCache.IdentitiesPath), func(ctx context.Context) {
 		var suffix string
-		if capabilities.Cached {
+		if srccfg.Capabilities.Cached {
 			suffix = rc.name
 		}
 
@@ -135,8 +132,6 @@ func (rc *remoteCluster) Remove() {
 	// disappear once the associated lease expires.
 }
 
-func (rc *remoteCluster) ClusterConfigRequired() bool { return false }
-
 // waitForConnection waits for a connection to be established to the remote cluster.
 // If the connection is not established within the timeout, the remote cluster is
 // removed from readiness checks.
@@ -155,6 +150,28 @@ func (rc *remoteCluster) waitForConnection(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (rc *remoteCluster) Status() *models.RemoteCluster {
+	status := rc.status()
+
+	status.NumNodes = int64(rc.nodes.watcher.NumEntries())
+	status.NumSharedServices = int64(rc.services.watcher.NumEntries())
+	status.NumIdentities = int64(rc.identities.watcher.NumEntries())
+	status.NumEndpoints = int64(rc.ipcache.watcher.NumEntries())
+
+	status.Synced = &models.RemoteClusterSynced{
+		Nodes:      rc.nodes.watcher.Synced(),
+		Services:   rc.services.watcher.Synced(),
+		Identities: rc.identities.watcher.Synced(),
+		Endpoints:  rc.ipcache.watcher.Synced(),
+	}
+
+	status.Ready = status.Ready &&
+		status.Synced.Nodes && status.Synced.Services &&
+		status.Synced.Identities && status.Synced.Endpoints
+
+	return status
 }
 
 type reflector struct {

@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
-	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	"github.com/cilium/cilium/pkg/hubble/defaults"
+	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/hubble/parser/options"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -88,7 +88,7 @@ func TestDecodeL7HTTPRequest(t *testing.T) {
 		},
 	}
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			switch {
 			case ip == netip.MustParseAddr(fakeSourceEndpoint.IPv4):
 				return &testutils.FakeEndpointInfo{
@@ -113,7 +113,7 @@ func TestDecodeL7HTTPRequest(t *testing.T) {
 	assert.Equal(t, fakeSourceEndpoint.IPv4, f.GetIP().GetSource())
 	assert.Equal(t, uint32(56789), f.GetL4().GetTCP().GetSourcePort())
 	assert.Equal(t, []string{"endpoint-4321"}, f.GetSourceNames())
-	assert.Equal(t, fakeSourceEndpoint.Labels, f.GetSource().GetLabels())
+	assert.Equal(t, fakeSourceEndpoint.Labels.GetModel(), f.GetSource().GetLabels())
 	assert.Equal(t, "", f.GetSource().GetNamespace())
 	assert.Equal(t, "", f.GetSource().GetPodName())
 	assert.Equal(t, "", f.GetSourceService().GetNamespace())
@@ -122,7 +122,7 @@ func TestDecodeL7HTTPRequest(t *testing.T) {
 	assert.Equal(t, fakeDestinationEndpoint.IPv4, f.GetIP().GetDestination())
 	assert.Equal(t, uint32(80), f.GetL4().GetTCP().GetDestinationPort())
 	assert.Equal(t, []string{"endpoint-1234"}, f.GetDestinationNames())
-	assert.Equal(t, fakeDestinationEndpoint.Labels, f.GetDestination().GetLabels())
+	assert.Equal(t, fakeDestinationEndpoint.Labels.GetModel(), f.GetDestination().GetLabels())
 	assert.Equal(t, "default", f.GetDestination().GetNamespace())
 	assert.Equal(t, "pod-1234", f.GetDestination().GetPodName())
 	assert.Equal(t, "default", f.GetDestinationService().GetNamespace())
@@ -203,7 +203,7 @@ func TestDecodeL7HTTPRecordResponse(t *testing.T) {
 		},
 	}
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			switch {
 			case ip.String() == fakeSourceEndpoint.IPv4:
 				return &testutils.FakeEndpointInfo{
@@ -228,7 +228,7 @@ func TestDecodeL7HTTPRecordResponse(t *testing.T) {
 	assert.Equal(t, fakeSourceEndpoint.IPv4, f.GetIP().GetDestination())
 	assert.Equal(t, uint32(56789), f.GetL4().GetTCP().GetDestinationPort())
 	assert.Equal(t, []string{"endpoint-4321"}, f.GetDestinationNames())
-	assert.Equal(t, fakeSourceEndpoint.Labels, f.GetDestination().GetLabels())
+	assert.Equal(t, fakeSourceEndpoint.Labels.GetModel(), f.GetDestination().GetLabels())
 	assert.Equal(t, "", f.GetDestination().GetNamespace())
 	assert.Equal(t, "", f.GetDestination().GetPodName())
 	assert.Equal(t, "", f.GetDestinationService().GetNamespace())
@@ -237,7 +237,7 @@ func TestDecodeL7HTTPRecordResponse(t *testing.T) {
 	assert.Equal(t, fakeDestinationEndpoint.IPv4, f.GetIP().GetSource())
 	assert.Equal(t, uint32(80), f.GetL4().GetTCP().GetSourcePort())
 	assert.Equal(t, []string{"endpoint-1234"}, f.GetSourceNames())
-	assert.Equal(t, fakeDestinationEndpoint.Labels, f.GetSource().GetLabels())
+	assert.Equal(t, fakeDestinationEndpoint.Labels.GetModel(), f.GetSource().GetLabels())
 	assert.Equal(t, "default", f.GetSource().GetNamespace())
 	assert.Equal(t, "pod-1234", f.GetSource().GetPodName())
 	assert.Equal(t, "default", f.GetSourceService().GetNamespace())

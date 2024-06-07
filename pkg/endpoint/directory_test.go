@@ -10,36 +10,36 @@ import (
 	"path/filepath"
 	"testing"
 
-	check "github.com/cilium/checkmate"
-
-	"github.com/cilium/cilium/pkg/checker"
+	"github.com/stretchr/testify/require"
 )
 
-func (s *EndpointSuite) TestMoveNewFilesTo(c *check.C) {
-	oldDir := c.MkDir()
-	newDir := c.MkDir()
+func TestMoveNewFilesTo(t *testing.T) {
+	setupEndpointSuite(t)
+
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
 	f1, err := os.CreateTemp(oldDir, "")
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 	f2, err := os.CreateTemp(oldDir, "")
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 	f3, err := os.CreateTemp(newDir, "")
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 
 	// Copy the same file in both directories to make sure the same files
 	// are not moved from the old directory into the new directory.
 	err = os.WriteFile(filepath.Join(oldDir, "foo"), []byte(""), os.FileMode(0644))
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 	err = os.WriteFile(filepath.Join(newDir, "foo"), []byte(""), os.FileMode(0644))
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 
 	compareDir := func(dir string, wantedFiles []string) {
 		files, err := os.ReadDir(dir)
-		c.Assert(err, check.IsNil)
+		require.Nil(t, err)
 		filesNames := make([]string, 0, len(wantedFiles))
 		for _, file := range files {
 			filesNames = append(filesNames, file.Name())
 		}
-		c.Assert(wantedFiles, checker.DeepEquals, filesNames)
+		require.EqualValues(t, filesNames, wantedFiles)
 	}
 
 	type args struct {
@@ -72,8 +72,8 @@ func (s *EndpointSuite) TestMoveNewFilesTo(c *check.C) {
 		},
 	}
 	for _, tt := range tests {
-		if err := moveNewFilesTo(tt.args.oldDir, tt.args.newDir); (err != nil) != tt.wantErr {
-			c.Assert(err != nil, check.Equals, tt.wantErr)
+		if err := copyExistingState(tt.args.oldDir, tt.args.newDir); (err != nil) != tt.wantErr {
+			require.Equal(t, tt.wantErr, err != nil)
 			compareDir(tt.args.oldDir, tt.wantOldDir)
 			compareDir(tt.args.newDir, tt.wantNewDir)
 		}
@@ -100,7 +100,7 @@ func benchmarkMoveNewFilesTo(b *testing.B, numFiles int) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := moveNewFilesTo(oldDir, newDir); err != nil {
+		if err := copyExistingState(oldDir, newDir); err != nil {
 			b.Fatal(err)
 		}
 	}

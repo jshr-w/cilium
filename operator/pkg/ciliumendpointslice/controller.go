@@ -27,7 +27,7 @@ type params struct {
 	Logger    logrus.FieldLogger
 	Lifecycle cell.Lifecycle
 
-	Clientset           k8sClient.Clientset
+	NewClient           k8sClient.ClientBuilderFunc
 	CiliumEndpoint      resource.Resource[*v2.CiliumEndpoint]
 	CiliumEndpointSlice resource.Resource[*v2alpha1.CiliumEndpointSlice]
 	CiliumNodes         resource.Resource[*v2.CiliumNode]
@@ -75,23 +75,52 @@ type Controller struct {
 }
 
 // registerController creates and initializes the CES controller
-func registerController(p params) {
-	if !p.Clientset.IsEnabled() || !p.SharedCfg.EnableCiliumEndpointSlice {
-		return
+func registerController(p params) error {
+	clientset, err := p.NewClient("ciliumendpointslice-controller")
+	if err != nil {
+		return err
 	}
+	if !clientset.IsEnabled() || !p.SharedCfg.EnableCiliumEndpointSlice {
+		return nil
+	}
+
+	rateLimitConfig, err := getRateLimitConfig(p)
+	if err != nil {
+		return err
+	}
+
+	checkDeprecatedOpts(p.Cfg, p.Logger)
 
 	cesController := &Controller{
 		logger:              p.Logger,
-		clientset:           p.Clientset,
+		clientset:           clientset,
 		ciliumEndpoint:      p.CiliumEndpoint,
 		ciliumEndpointSlice: p.CiliumEndpointSlice,
 		ciliumNodes:         p.CiliumNodes,
 		slicingMode:         p.Cfg.CESSlicingMode,
 		maxCEPsInCES:        p.Cfg.CESMaxCEPsInCES,
-		rateLimit:           getRateLimitConfig(p),
+		rateLimit:           rateLimitConfig,
 		enqueuedAt:          make(map[CESName]time.Time),
 		metrics:             p.Metrics,
 	}
 
 	p.Lifecycle.Append(cesController)
+	return nil
+}
+
+// checkDeprecatedOpts will log an error if the user has supplied any of the
+// no-op, deprecated rate limit options.
+// TODO: Remove this function when the deprecated options are removed.
+func checkDeprecatedOpts(cfg Config, logger logrus.FieldLogger) {
+	switch {
+	case cfg.CESWriteQPSLimit > 0:
+	case cfg.CESWriteQPSBurst > 0:
+	case cfg.CESEnableDynamicRateLimit:
+	case len(cfg.CESDynamicRateLimitNodes) > 0:
+	case len(cfg.CESDynamicRateLimitQPSLimit) > 0:
+	case len(cfg.CESDynamicRateLimitQPSBurst) > 0:
+	default:
+		return
+	}
+	logger.Errorf("You are using deprecated rate limit option(s) that have no effect. To configure custom rate limits please use --%s", CESRateLimits)
 }

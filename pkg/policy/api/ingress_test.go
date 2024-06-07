@@ -4,14 +4,72 @@
 package api
 
 import (
-	. "github.com/cilium/checkmate"
+	"context"
+	"testing"
+
+	"fmt"
+
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	"github.com/cilium/cilium/pkg/checker"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 )
 
-func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
+func TestIngressRequiresDerivativeRuleWithoutToGroups(t *testing.T) {
+	ig := IngressRule{}
+	require.Equal(t, false, ig.RequiresDerivative())
+}
+
+func TestRequiresDerivativeRuleWithFromGroups(t *testing.T) {
+	ig := IngressRule{}
+	ig.FromGroups = []Groups{
+		GetGroupsRule(),
+	}
+	require.Equal(t, true, ig.RequiresDerivative())
+}
+
+func TestCreateDerivativeRuleWithoutFromGroups(t *testing.T) {
+	ig := &IngressRule{
+		IngressCommonRule: IngressCommonRule{
+			FromEndpoints: []EndpointSelector{
+				{
+					LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+						"test": "true",
+					},
+					},
+				},
+			},
+		},
+	}
+	newRule, err := ig.CreateDerivative(context.TODO())
+	require.EqualValues(t, newRule, ig)
+	require.Nil(t, err)
+}
+
+func TestCreateDerivativeRuleWithFromGroups(t *testing.T) {
+	cb := GetCallBackWithRule("192.168.1.1")
+	RegisterToGroupsProvider(AWSProvider, cb)
+
+	ig := &IngressRule{
+		IngressCommonRule: IngressCommonRule{
+			FromGroups: []Groups{
+				GetGroupsRule(),
+			},
+		},
+	}
+
+	// Checking that the derivative rule is working correctly
+	require.Equal(t, true, ig.RequiresDerivative())
+
+	newRule, err := ig.CreateDerivative(context.TODO())
+	require.Nil(t, err)
+	require.Equal(t, 0, len(newRule.FromGroups))
+	require.Equal(t, 1, len(newRule.FromCIDRSet))
+}
+
+func TestIsLabelBasedIngress(t *testing.T) {
+	setUpSuite(t)
+
 	type args struct {
 		eg *IngressRule
 	}
@@ -231,8 +289,8 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 	for _, tt := range tests {
 		args := tt.setupArgs()
 		want := tt.setupWanted()
-		c.Assert(args.eg.sanitize(), Equals, nil, Commentf("Test name: %q", tt.name))
+		require.Equal(t, nil, args.eg.sanitize(), fmt.Sprintf("Test name: %q", tt.name))
 		isLabelBased := args.eg.AllowsWildcarding()
-		c.Assert(isLabelBased, checker.DeepEquals, want.isLabelBased, Commentf("Test name: %q", tt.name))
+		require.EqualValues(t, want.isLabelBased, isLabelBased, fmt.Sprintf("Test name: %q", tt.name))
 	}
 }

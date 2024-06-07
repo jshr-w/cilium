@@ -12,15 +12,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cilium/statedb"
+
 	"github.com/cilium/cilium/api/v1/client/daemon"
 	"github.com/cilium/cilium/api/v1/models"
 	pkg "github.com/cilium/cilium/pkg/client"
 	"github.com/cilium/cilium/pkg/command"
 	healthPkg "github.com/cilium/cilium/pkg/health/client"
 	"github.com/cilium/cilium/pkg/health/defaults"
-	"github.com/cilium/cilium/pkg/healthv2"
-	healthTypes "github.com/cilium/cilium/pkg/healthv2/types"
-	"github.com/cilium/cilium/pkg/statedb"
+	"github.com/cilium/cilium/pkg/hive/health"
+	"github.com/cilium/cilium/pkg/hive/health/types"
 )
 
 // statusCmd represents the daemon_status command
@@ -108,14 +109,14 @@ func statusDaemon() {
 			}
 		}
 		if healthEnabled {
-			table := statedb.NewRemoteTable[healthTypes.Status](client, "health")
-			ss := []healthTypes.Status{}
-			iter, errChan := table.LowerBound(context.Background(), healthv2.PrimaryIndex.Query("agent"))
+			table := newRemoteTable[types.Status]("health")
+			ss := []types.Status{}
+			iter, errChan := table.LowerBound(context.Background(), health.PrimaryIndex.Query("agent"))
 
 			if iter != nil {
-				err := statedb.ProcessEach[healthTypes.Status](
+				err := statedb.ProcessEach[types.Status](
 					iter,
-					func(obj healthTypes.Status, rev statedb.Revision) error {
+					func(obj types.Status, rev statedb.Revision) error {
 						ss = append(ss, obj)
 						return nil
 					})

@@ -6,18 +6,16 @@ package endpoint
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"testing"
 	"time"
 
-	check "github.com/cilium/checkmate"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/identity/cache"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
@@ -28,31 +26,32 @@ import (
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
-func (s *EndpointSuite) TestUpdateVisibilityPolicy(c *check.C) {
-	do := &DummyOwner{repo: policy.NewPolicyRepository(nil, nil, nil, nil)}
-	ep := NewTestEndpointWithState(c, do, do, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 12345, StateReady)
+func TestUpdateVisibilityPolicy(t *testing.T) {
+	setupEndpointSuite(t)
+	do := &DummyOwner{repo: policy.NewPolicyRepository(nil, nil, nil)}
+	ep := NewTestEndpointWithState(t, do, do, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 12345, StateReady)
 	ep.UpdateVisibilityPolicy(func(_, _ string) (string, error) {
 		return "", nil
 	})
-	c.Assert(ep.visibilityPolicy, check.IsNil)
+	require.Nil(t, ep.visibilityPolicy)
 
 	ep.UpdateVisibilityPolicy(func(_, _ string) (proxyVisibility string, err error) {
 		return "<Ingress/80/TCP/HTTP>", nil
 	})
 
-	c.Assert(ep.visibilityPolicy, check.Not(check.Equals), nil)
-	c.Assert(ep.visibilityPolicy.Ingress["80/TCP"], checker.DeepEquals, &policy.VisibilityMetadata{
+	require.NotEqual(t, nil, ep.visibilityPolicy)
+	require.Equal(t, &policy.VisibilityMetadata{
 		Parser:  policy.ParserTypeHTTP,
 		Port:    uint16(80),
 		Proto:   u8proto.TCP,
 		Ingress: true,
-	})
+	}, ep.visibilityPolicy.Ingress["80/TCP"])
 
 	// Check that updating after previously having value works.
 	ep.UpdateVisibilityPolicy(func(_, _ string) (string, error) {
 		return "", nil
 	})
-	c.Assert(ep.visibilityPolicy, check.IsNil)
+	require.Nil(t, ep.visibilityPolicy)
 }
 
 // This test fuzzes the incremental update engine from an end-to-end perspective
@@ -72,9 +71,9 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 	policy.SetPolicyEnabled("always")
 	defer policy.SetPolicyEnabled(pe)
 
-	idcache := make(cache.IdentityCache, testfactor)
+	idcache := make(identity.IdentityMap, testfactor)
 	fakeAllocator := testidentity.NewMockIdentityAllocator(idcache)
-	repo := policy.NewPolicyRepository(fakeAllocator, fakeAllocator.GetIdentityCache(), nil, nil)
+	repo := policy.NewPolicyRepository(fakeAllocator.GetIdentityCache(), nil, nil)
 
 	defer func() {
 		repo.RepositoryChangeQueue.Stop()
@@ -96,7 +95,7 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 		// t.Logf("allocated label %s id %d", labelKeys, id.ID) // commented out for speed
 
 		wg := &sync.WaitGroup{}
-		repo.GetSelectorCache().UpdateIdentities(cache.IdentityCache{
+		repo.GetSelectorCache().UpdateIdentities(identity.IdentityMap{
 			id.ID: id.LabelArray,
 		}, nil, wg)
 		wg.Wait()
@@ -142,10 +141,7 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 		},
 	}
 
-	_, _, err := repo.Add(*egressDenyRule)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repo.MustAddList(api.Rules{egressDenyRule})
 
 	// Track all IDs we allocate so we can validate later that we never miss any
 	checkMutex := lock.Mutex{}
@@ -170,15 +166,16 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 		done = true
 	}()
 
+	stats := new(regenerationStatistics)
 	// Continuously compute policy for the pod and ensure we never missed an incremental update.
 	for {
 		t.Log("Calculating policy...")
-		res, err := ep.regeneratePolicy()
+		res, err := ep.regeneratePolicy(stats)
 		assert.Nil(t, err)
 
 		// Sleep a random amount, so we accumulate some changes
 		// This does not slow down the test, since we always generate testFactor identities.
-		time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+		time.Sleep(time.Duration(rand.IntN(10)) * time.Millisecond)
 
 		// Now, check that all the expected entries are there
 		checkMutex.Lock()

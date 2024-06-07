@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/statedb"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ import (
 	operatorCmd "github.com/cilium/cilium/operator/cmd"
 	operatorOption "github.com/cilium/cilium/operator/option"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/k8s/apis"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
@@ -59,6 +61,10 @@ type ControlPlaneTest struct {
 	operatorHandle      *operatorHandle
 	Datapath            *fakeTypes.FakeDatapath
 	establishedWatchers *lock.Map[string, struct{}]
+}
+
+func (cpt *ControlPlaneTest) AgentDB() (*statedb.DB, statedb.Table[datapathTables.NodeAddress]) {
+	return cpt.agentHandle.db, cpt.agentHandle.nodeAddrs
 }
 
 func NewControlPlaneTest(t *testing.T, nodeName string, k8sVersion string) *ControlPlaneTest {

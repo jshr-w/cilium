@@ -6,6 +6,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"net"
 
 	"github.com/sirupsen/logrus"
@@ -23,16 +24,11 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy/endpoint"
 	"github.com/cilium/cilium/pkg/proxy/types"
-	"github.com/cilium/cilium/pkg/rand"
 	"github.com/cilium/cilium/pkg/revert"
 	"github.com/cilium/cilium/pkg/time"
 )
 
-var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "proxy")
-
-	portRandomizer = rand.NewSafeRand(time.Now().UnixNano())
-)
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "proxy")
 
 // field names used while logging
 const (
@@ -186,7 +182,7 @@ func (p *Proxy) allocatePort(port, min, max uint16) (uint16, error) {
 	}
 
 	// TODO: Maybe not create a large permutation each time?
-	portRange := portRandomizer.Perm(int(max - min + 1))
+	portRange := rand.Perm(int(max - min + 1))
 
 	// Allow reuse of previously used ports only if no ports are otherwise availeble.
 	// This allows the same port to be used again by a listener being reconfigured
@@ -403,20 +399,19 @@ func (p *Proxy) SetProxyPort(name string, proxyType types.ProxyType, port uint16
 // ReinstallRoutingRules ensures the presence of routing rules and tables needed
 // to route packets to and from the L7 proxy.
 func (p *Proxy) ReinstallRoutingRules() error {
+	fromIngressProxy, fromEgressProxy := requireFromProxyRoutes()
+
 	if option.Config.EnableIPv4 {
 		if err := installToProxyRoutesIPv4(); err != nil {
 			return err
 		}
 
-		if err := removeFromEgressProxyRoutesIPv4(); err != nil {
-			return err
-		}
-		if !option.Config.EnableIPSec || option.Config.TunnelingEnabled() {
-			if err := removeFromIngressProxyRoutesIPv4(); err != nil {
+		if fromIngressProxy || fromEgressProxy {
+			if err := installFromProxyRoutesIPv4(node.GetInternalIPv4Router(), defaults.HostDevice, fromIngressProxy, fromEgressProxy); err != nil {
 				return err
 			}
 		} else {
-			if err := installFromProxyRoutesIPv4(node.GetInternalIPv4Router(), defaults.HostDevice); err != nil {
+			if err := removeFromProxyRoutesIPv4(); err != nil {
 				return err
 			}
 		}
@@ -424,7 +419,7 @@ func (p *Proxy) ReinstallRoutingRules() error {
 		if err := removeToProxyRoutesIPv4(); err != nil {
 			return err
 		}
-		if err := removeFromIngressProxyRoutesIPv4(); err != nil {
+		if err := removeFromProxyRoutesIPv4(); err != nil {
 			return err
 		}
 	}
@@ -434,19 +429,16 @@ func (p *Proxy) ReinstallRoutingRules() error {
 			return err
 		}
 
-		if err := removeFromEgressProxyRoutesIPv6(); err != nil {
-			return err
-		}
-		if !option.Config.EnableIPSec || option.Config.TunnelingEnabled() {
-			if err := removeFromIngressProxyRoutesIPv6(); err != nil {
-				return err
-			}
-		} else {
+		if fromIngressProxy || fromEgressProxy {
 			ipv6, err := getCiliumNetIPv6()
 			if err != nil {
 				return err
 			}
-			if err := installFromProxyRoutesIPv6(ipv6, defaults.HostDevice); err != nil {
+			if err := installFromProxyRoutesIPv6(ipv6, defaults.HostDevice, fromIngressProxy, fromEgressProxy); err != nil {
+				return err
+			}
+		} else {
+			if err := removeFromProxyRoutesIPv6(); err != nil {
 				return err
 			}
 		}
@@ -454,12 +446,18 @@ func (p *Proxy) ReinstallRoutingRules() error {
 		if err := removeToProxyRoutesIPv6(); err != nil {
 			return err
 		}
-		if err := removeFromIngressProxyRoutesIPv6(); err != nil {
+		if err := removeFromProxyRoutesIPv6(); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func requireFromProxyRoutes() (fromIngressProxy, fromEgressProxy bool) {
+	fromIngressProxy = (option.Config.EnableEnvoyConfig || option.Config.EnableIPSec) && !option.Config.TunnelingEnabled()
+	fromEgressProxy = option.Config.EnableIPSec && !option.Config.TunnelingEnabled()
+	return
 }
 
 // getCiliumNetIPv6 retrieves the first IPv6 address from the cilium_net device.

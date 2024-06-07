@@ -36,6 +36,7 @@ Dockerfile
 Dockerfiles
 Donenfeld
 ECMP
+EKS
 ENI
 Efx
 Engleder
@@ -294,6 +295,7 @@ eBGP
 eBPF
 eXpress
 ebpf
+edts
 effectful
 egressing
 elfutils
@@ -384,6 +386,7 @@ impactful
 ingressing
 init
 initContainer
+initContainers
 initialDelaySeconds
 inlined
 inlines
@@ -401,6 +404,7 @@ ipcache
 ipmasq
 iproute
 ipsec
+ipsets
 iptables
 ipv
 istio
@@ -504,6 +508,7 @@ memcd
 microservice
 microservices
 minikube
+misconfiguration
 misconfigures
 mitigations
 mlx
@@ -609,6 +614,7 @@ qede
 qemu
 queryable
 queueing
+rST
 rc
 reStructuredText
 reachability
@@ -617,6 +623,7 @@ rebased
 rebasing
 recompiles
 reconfigurations
+reconnections
 recv
 regenerations
 regexes
@@ -627,6 +634,7 @@ repo
 repos
 reproducibility
 requireIPv
+resync
 retpoline
 retransmission
 retransmissions
@@ -636,7 +644,6 @@ roadmap
 rollout
 routable
 routingMode
-rST
 runnable
 runtimes
 sandboxing
@@ -700,6 +707,7 @@ tcpdump
 tcplife
 tcptop
 tcptracer
+tcx
 templating
 terminatingTLS
 terminationGracePeriodSeconds
@@ -779,6 +787,7 @@ webservice
 whitespace
 wildcarded
 workqueue
+workstream
 www
 xDS
 xdp

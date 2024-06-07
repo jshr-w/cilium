@@ -391,8 +391,8 @@ Policy
 Name                                       Labels                                             Default    Description
 ========================================== ================================================== ========== ========================================================
 ``policy``                                                                                    Enabled    Number of policies currently loaded
-``policy_regeneration_total``                                                                 Enabled    Total number of policies regenerated successfully
-``policy_regeneration_time_stats_seconds`` ``scope``                                          Enabled    Policy regeneration time stats labeled by the scope
+``policy_regeneration_total``                                                                 Enabled    Deprecated, will be removed in Cilium 1.17 - use ``endpoint_regenerations_total`` instead. Total number of policies regenerated successfully
+``policy_regeneration_time_stats_seconds`` ``scope``                                          Enabled    Deprecated, will be removed in Cilium 1.17 - use ``endpoint_regeneration_time_stats_seconds`` instead. Policy regeneration time stats labeled by the scope
 ``policy_max_revision``                                                                       Enabled    Highest policy revision number in the agent
 ``policy_change_total``                                                                       Enabled    Number of policy changes by outcome
 ``policy_endpoint_enforcement_status``                                                        Enabled    Number of endpoints labeled by policy enforcement status
@@ -675,6 +675,21 @@ which is passed as the ``controller-group-metrics`` configuration flag,
 or the ``prometheus.controllerGroupMetrics`` helm value. The current
 recommended default set of group names can be found in the values file of
 the Cilium Helm chart. The special names "all" and "none" are supported.
+
+.. _ces_metrics:
+
+CiliumEndpointSlices (CES)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+============================================== ================================ ========================================================
+Name                                           Labels                           Description
+============================================== ================================ ========================================================
+``number_of_ceps_per_ces``                                                      The number of CEPs batched in a CES
+``number_of_cep_changes_per_ces``              ``opcode``                       The number of changed CEPs in each CES update
+``ces_sync_errors_total``                                                       Number of CES sync errors
+``ces_sync_total``                             ``outcome``                      The number of completed CES syncs by outcome
+``ces_queueing_delay_seconds``                                                  CiliumEndpointSlice queueing delay in seconds
+============================================== ================================ ========================================================
 
 
 Hubble
@@ -1256,3 +1271,24 @@ which is passed as the ``controller-group-metrics`` configuration
 flag. The current default set for ``kvstoremesh`` found in the
 Cilium Helm chart is the special name "all", which enables the metric
 for all controller groups. The special name "none" is also supported.
+
+NAT
+~~~
+
+======================================== ================================================== ========== ========================================================
+Name                                     Labels                                             Default    Description
+======================================== ================================================== ========== ========================================================
+``nat_endpoint_max_connection``          ``family``                                         Enabled    Saturation of the most saturated distinct NAT mapped connection, in terms of egress-IP and remote endpoint address.
+======================================== ================================================== ========== ========================================================
+
+These metrics are for monitoring Cilium's NAT mapping functionality. NAT is used by features such as Egress Gateway and BPF masquerading.
+
+The NAT map holds mappings for masqueraded connections. Connection held in the NAT table that are masqueraded with the
+same egress-IP and are going to the same remote endpoints IP and port all require a unique source port for the mapping.
+This means that any Node masquerading connections to a distinct external endpoint is limited by the possible ephemeral source ports.
+
+Given a Node forwarding one or more such egress-IP and remote endpoint tuples, the ```nat_endpoint_max_connection``` metric is the most saturated such connection in terms of a percent of possible source ports available.
+This metric is especially useful when using the egress gateway feature where it's possible to overload a Node if many connections are all going to the same endpoint.
+In general, this metric should normally be fairly low.
+A high number here may indicate that a Node is reaching its limit for connections to one or more external endpoints.
+
