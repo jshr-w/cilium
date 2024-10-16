@@ -394,6 +394,7 @@ func FormatHealthStatusResponse(w io.Writer, sr *models.HealthStatusResponse, pr
 		}
 	} else {
 		fmt.Fprintf(w, "Probe time:\t%s\n", sr.Timestamp)
+		//fmt.Fprintf(w, "Probe interval:\t%s\n", sr.)
 		fmt.Fprintf(w, "Nodes:\n")
 	}
 

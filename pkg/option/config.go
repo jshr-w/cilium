@@ -1130,6 +1130,9 @@ const (
 
 	// EnableNonDefaultDenyPolicies allows policies to define whether they are operating in default-deny mode
 	EnableNonDefaultDenyPolicies = "enable-non-default-deny-policies"
+
+	// ConnectivityProbeFrequencyRatio is the name of the option to specify the connectivity probe frequency
+	ConnectivityProbeFrequencyRatio = "connectivity-probe-frequency-ratio"
 )
 
 // Default string arguments
@@ -2220,6 +2223,9 @@ type DaemonConfig struct {
 
 	// EnableNonDefaultDenyPolicies allows policies to define whether they are operating in default-deny mode
 	EnableNonDefaultDenyPolicies bool
+
+	// ConnectivityProbeFrequencyRatio is the ratio of the connectivity probe frequency vs resource consumption
+	ConnectivityProbeFrequencyRatio float64
 }
 
 var (
@@ -2279,6 +2285,8 @@ var (
 		EnableInternalTrafficPolicy:   defaults.EnableInternalTrafficPolicy,
 
 		EnableNonDefaultDenyPolicies: defaults.EnableNonDefaultDenyPolicies,
+
+		ConnectivityProbeFrequencyRatio: defaults.ConnectivityProbeFrequencyRatio,
 	}
 )
 
@@ -3250,6 +3258,15 @@ func (c *DaemonConfig) Populate(vp *viper.Viper) {
 	c.LoadBalancerProtocolDifferentiation = vp.GetBool(LoadBalancerProtocolDifferentiation)
 
 	c.EnableInternalTrafficPolicy = vp.GetBool(EnableInternalTrafficPolicy)
+
+	// Allow the range [0.0, 1.0].
+	connectivityFreqRatio := vp.GetFloat64(ConnectivityProbeFrequencyRatio)
+	if 0.0 <= connectivityFreqRatio && connectivityFreqRatio <= 1.0 {
+		c.ConnectivityProbeFrequencyRatio = connectivityFreqRatio
+	} else {
+		log.Warningf("specified connectivity probe frequency ratio %f must be in the range [0.0, 1.0], using default", connectivityFreqRatio)
+		c.ConnectivityProbeFrequencyRatio = defaults.ConnectivityProbeFrequencyRatio
+	}
 }
 
 func (c *DaemonConfig) populateLoadBalancerSettings(vp *viper.Viper) {

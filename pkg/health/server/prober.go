@@ -17,16 +17,20 @@ import (
 
 	"github.com/cilium/cilium/api/v1/health/models"
 	ciliumModels "github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/health/probe"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 // healthReport is a snapshot of the health of the cluster.
 type healthReport struct {
 	startTime time.Time
 	nodes     []*models.NodeStatus
+
+	// TODO: every node should be associated with a timestamp of when the status was last updated.
 }
 
 type connectivityResult struct {
@@ -54,6 +58,8 @@ type prober struct {
 	nodes   nodeMap
 
 	probeRateLimiter *rate.Limiter
+	probeInterval    time.Duration
+	probeIpCount     int
 }
 
 // copyResultRLocked makes a copy of the path status for the specified IP.
@@ -316,7 +322,7 @@ func icmpPing(node string, ip string, ctx context.Context, resChan chan<- connec
 	resChan <- connectivityResult{ip: ip, status: result}
 }
 
-func Per(nodes int, duration time.Duration) rate.Limit {
+func per(nodes int, duration time.Duration) rate.Limit {
 	return rate.Every(duration / time.Duration(nodes))
 }
 
@@ -357,7 +363,7 @@ func httpProbe(node string, ip string, ctx context.Context, resChan chan<- conne
 	resChan <- connectivityResult{ip: ip, status: result}
 }
 
-func (p *prober) runProbe() {
+func (p *prober) runProbe(nodeIps map[string][]*net.IPAddr) {
 	httpResChan := make(chan connectivityResult)
 	icmpResChan := make(chan connectivityResult)
 	wg := sync.WaitGroup{}
@@ -373,13 +379,7 @@ func (p *prober) runProbe() {
 	debugLogsEnabled := logging.CanLogAt(log.Logger, logrus.DebugLevel)
 	scopedLog := log
 
-	nodeIps := p.getIPsByNode()
-	// Spread probes evenly across probing interval.
-	ipCount := 0
-	for _, ips := range nodeIps {
-		ipCount += len(ips)
-	}
-	p.probeRateLimiter = rate.NewLimiter(Per(ipCount, p.server.Config.ProbeInterval), 1)
+	p.probeRateLimiter = rate.NewLimiter(per(p.probeIpCount, p.probeInterval), 1)
 
 	// update results as probes complete
 	resultsWg.Add(2)
@@ -457,36 +457,29 @@ func (p *prober) Stop() {
 }
 
 // RunLoop periodically sends probes out to all of the other cilium nodes to
-// gather connectivity status for the cluster.
+// gather connectivity status for the cluster once the current probing interval
+// has elapsed.
 //
 // This is a non-blocking method so it immediately returns. If you want to
 // stop sending packets, call Stop().
 func (p *prober) RunLoop() {
 	go func() {
-		tick := time.NewTicker(p.server.ProbeInterval)
-		p.runProbe()
+		nodeIps := p.getIPsByNode()
+		p.setProbeInterval(nodeIps)
+		tick := time.NewTicker(p.probeInterval)
+		p.runProbe(nodeIps)
 	loop:
 		for {
 			select {
 			case <-p.stop:
 				break loop
 			case <-tick.C:
-				// (1) We can receive the same nodes multiple times,
-				// updated node is present in both nodesAdded and nodesRemoved
-				// (2) We don't want to report stale nodes in metrics
-				if nodesAdded, nodesRemoved, err := p.server.getNodes(); err != nil {
-					// reset the cache by setting clientID to 0 and removing all current nodes
-					p.server.clientID = 0
-					p.setNodes(nil, p.nodes)
-					log.WithError(err).Error("unable to get cluster nodes")
-				} else {
-					// (1) setNodes implementation doesn't override results for existing nodes.
-					// (2) Remove stale nodes so we don't report them in metrics before updating results
-					p.setNodes(nodesAdded, nodesRemoved)
-					// (2) Update results without stale nodes
-					p.server.updateCluster(p.getResults())
-				}
-				p.runProbe()
+				// Reset probe interval based on cluster size.
+				nodeIps := p.getIPsByNode()
+				p.setProbeInterval(nodeIps)
+				tick.Reset(p.probeInterval)
+
+				p.runProbe(nodeIps)
 				continue
 			}
 		}
@@ -511,3 +504,39 @@ func newProber(s *Server, nodes nodeMap) *prober {
 	prober.setNodes(nodes, nil)
 	return prober
 }
+
+// Given user-provided ConnectivityProbeFrequencyRatio, uses base interval
+// in [10, 110] to set the probe interval.
+func (p *prober) setProbeInterval(nodeIps map[string][]*net.IPAddr) {
+	scopedLog := log
+	// TODO: Is there a better way to do this :)
+	baseInterval := (10 + option.Config.ConnectivityProbeFrequencyRatio*100) * 1e9
+	ipCount := 0
+	for _, ips := range nodeIps {
+		ipCount += len(ips)
+	}
+	p.Lock()
+	defer p.Unlock()
+	p.probeInterval = backoff.ClusterSizeDependantInterval(time.Duration(baseInterval), ipCount)
+	// TODO: This probeInterval is set using number of IPs =/= number of nodes, so it doesn't exactly coordinate with what would be expected based on the CFP. Think about it?
+	p.probeIpCount = ipCount
+	scopedLog.Debug("Probe interval set to ", p.probeInterval)
+	scopedLog.Debug("Probe IP count set to ", p.probeIpCount)
+}
+
+// TODOs:
+// 1. Per-IP last-update time to avoid overwriting latest results.
+// 2. cilium-health status should report: (1) current probe interval
+// 3. Disable asynchronous prober.
+
+// Issue:
+// Prober seems too frequent in some cases.
+// E.g. 2-node cluster, probe interval is 131 ns.
+// => ClusterSizeDependentInterval returning in ns. => Fixed-ish.
+
+// Also, is the probe status being updated?
+// => No, cilium-health status is not updating.
+// => Probes are successful, though.
+
+// Idea: Shall we set probe interval as a configurable value based on the number of nodes?
+// E.g. [(>=0 nodes, x), (>=100 nodes, y), (>=1000 nodes, z)]?

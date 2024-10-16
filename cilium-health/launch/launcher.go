@@ -12,6 +12,7 @@ import (
 	healthApi "github.com/cilium/cilium/api/v1/health/server"
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/api"
+
 	ciliumPkg "github.com/cilium/cilium/pkg/client"
 	"github.com/cilium/cilium/pkg/health/client"
 	"github.com/cilium/cilium/pkg/health/defaults"
@@ -34,7 +35,6 @@ type CiliumHealth struct {
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "cilium-health-launcher")
 
 const (
-	serverProbeInterval  = 60 * time.Second
 	serverProbeDeadline  = 1 * time.Second
 	connectRetryInterval = 1 * time.Second
 	statusProbeInterval  = 5 * time.Second
@@ -50,7 +50,6 @@ func Launch(spec *healthApi.Spec, initialized <-chan struct{}) (*CiliumHealth, e
 	config := server.Config{
 		CiliumURI:     ciliumPkg.DefaultSockPath(),
 		Debug:         option.Config.Opts.IsEnabled(option.Debug),
-		ProbeInterval: serverProbeInterval,
 		ProbeDeadline: serverProbeDeadline,
 		HTTPPathPort:  option.Config.ClusterHealthPort,
 		HealthAPISpec: spec,

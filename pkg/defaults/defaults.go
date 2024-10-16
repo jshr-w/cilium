@@ -570,6 +570,9 @@ const (
 
 	// EnableNonDefaultDenyPolicies allows policies to define whether they are operating in default-deny mode
 	EnableNonDefaultDenyPolicies = true
+
+	// ConnectivityProbeFrequencyRatio is the default connectivity probe frequency
+	ConnectivityProbeFrequencyRatio = 0.5
 )
 
 var (

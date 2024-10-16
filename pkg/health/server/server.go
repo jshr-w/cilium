@@ -36,7 +36,6 @@ var (
 type Config struct {
 	Debug         bool
 	CiliumURI     string
-	ProbeInterval time.Duration
 	ProbeDeadline time.Duration
 	HTTPPathPort  int
 	HealthAPISpec *healthApi.Spec
@@ -152,7 +151,11 @@ func (s *Server) updateCluster(report *healthReport) {
 	s.Lock()
 	defer s.Unlock()
 
-	if s.connectivity.startTime.Before(report.startTime) {
+	scopedLog := log
+	scopedLog.Debugf("SHREYA Start time: Report %s vs. Current %s", report.startTime, s.connectivity.startTime)
+	if s.connectivity.startTime.Compare(report.startTime) <= 0 {
+		// Allow connectivity status to be updated as more probes succeed in the same interval, since no async probe can run.
+		scopedLog.Debug("SHREYA Update connectivity report")
 		s.connectivity = report
 		s.collectNodeConnectivityMetrics()
 	}
@@ -362,6 +365,41 @@ func (s *Server) runActiveServices() error {
 	prober := newProber(s, nodesAdded)
 	prober.RunLoop()
 	defer prober.Stop()
+
+	scopedLog := log
+	// Periodically update the cluster status, without waiting for the
+	// probing interval to pass.
+
+	go func() {
+		scopedLog.Debug("SHREYA Starting ticker")
+		tick := time.NewTicker(60 * time.Second) // TODO: Should use const for this?
+	loop:
+		for {
+			select {
+			case <-prober.stop:
+				break loop
+			case <-tick.C:
+				scopedLog.Debug("SHREYA Tick")
+				// (1) We can receive the same nodes multiple times,
+				// updated node is present in both nodesAdded and nodesRemoved
+				// (2) We don't want to report stale nodes in metrics
+				if nodesAdded, nodesRemoved, err := prober.server.getNodes(); err != nil {
+					// reset the cache by setting clientID to 0 and removing all current nodes
+					prober.server.clientID = 0
+					prober.setNodes(nil, prober.nodes)
+					log.WithError(err).Error("unable to get cluster nodes")
+				} else {
+					// (1) setNodes implementation doesn't override results for existing nodes.
+					// (2) Remove stale nodes so we don't report them in metrics before updating results
+					prober.setNodes(nodesAdded, nodesRemoved)
+					// (2) Update results without stale nodes
+					scopedLog.Debug("SHREYA Call updating cluster status")
+					prober.server.updateCluster(prober.getResults())
+				}
+			}
+		}
+		tick.Stop()
+	}()
 
 	return s.Server.Serve()
 }

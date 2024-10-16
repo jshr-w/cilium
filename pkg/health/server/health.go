@@ -57,3 +57,6 @@ func (h *getHealthz) Handle(params GetHealthzParams) middleware.Responder {
 	sr.SystemLoad = load
 	return NewGetHealthzOK().WithPayload(&sr)
 }
+
+// TODO
+// To update api: cilium/api/v1/health/openapi.yaml healthstatusresponse
