@@ -124,6 +124,8 @@ func (p *prober) getResults() *healthReport {
 			}
 		}
 
+		// TODO: jshr
+		// Temporarily prevent result from changing once an error has been reported.
 		resultMap[node.Name] = status
 	}
 
@@ -283,12 +285,14 @@ func icmpPing(node string, ip string, ctx context.Context, resChan chan<- connec
 		})
 	}
 
+	log.Debug("Pinging host")
 	scopedLog.Debug("Pinging host")
 	pinger, err := probing.NewPinger(ip)
 	if err != nil {
 		if debugLogsEnabled {
 			scopedLog.WithError(err).Debug("Failed to create pinger")
 		}
+		log.WithError(err).Warn("Failed to create pinger")
 		result.Status = err.Error()
 		resChan <- connectivityResult{ip: ip, status: result}
 		return
@@ -305,12 +309,14 @@ func icmpPing(node string, ip string, ctx context.Context, resChan chan<- connec
 		} else {
 			scopedLog.Debug("Ping failed")
 			result.Status = "Connection timed out"
+			log.Warn("Ping failed: Connection timed out")
 		}
 	}
 	pinger.SetPrivileged(true)
 	err = pinger.Run()
 	if err != nil {
 		scopedLog.Debugf("Failed to run pinger for IP %s: %v", ip, err)
+		log.WithError(err).Error("Failed to run pinger")
 		result.Status = err.Error()
 	}
 	resChan <- connectivityResult{ip: ip, status: result}
@@ -349,6 +355,7 @@ func httpProbe(node string, ip string, ctx context.Context, resChan chan<- conne
 		result.Latency = rtt.Nanoseconds()
 	} else {
 		if debugLogsEnabled {
+			log.Warn("Greeting failed")
 			scopedLog.WithError(err).Debug("Greeting failed")
 		}
 		result.Status = err.Error()
