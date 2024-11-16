@@ -78,8 +78,12 @@ func (k *K8sCiliumEndpointsWatcher) initCiliumEndpointOrSlices(ctx context.Conte
 	asyncControllers.Add(1)
 	if option.Config.EnableCiliumEndpointSlice {
 		go k.ciliumEndpointSliceInit(ctx, asyncControllers)
-	} else {
+	} else if !option.Config.DisableCiliumEndpointCRD && option.Config.EnablePolicy != "never" {
+		// Only enable CEP watcher if CEP CRD is enabled and policy is not disabled
+		log.Debugf("jshr: CiliumEndpoint CRD is enabled, starting CiliumEndpoint watcher")
 		go k.ciliumEndpointsInit(ctx, asyncControllers)
+	} else {
+		log.Debugf("jshr: Didn't enable CEP or CES watcher")
 	}
 }
 
