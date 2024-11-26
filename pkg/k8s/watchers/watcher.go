@@ -128,14 +128,14 @@ type K8sWatcher struct {
 
 	clientset client.Clientset
 
-	k8sEventReporter          *K8sEventReporter
-	k8sPodWatcher             *K8sPodWatcher
-	k8sCiliumNodeWatcher      *K8sCiliumNodeWatcher
-	k8sNamespaceWatcher       *K8sNamespaceWatcher
-	k8sServiceWatcher         *K8sServiceWatcher
-	k8sEndpointsWatcher       *K8sEndpointsWatcher
-	k8sCiliumLRPWatcher       *K8sCiliumLRPWatcher
-	k8sCiliumEndpointsWatcher *K8sCiliumEndpointsWatcher
+	k8sEventReporter     *K8sEventReporter
+	k8sPodWatcher        *K8sPodWatcher
+	k8sCiliumNodeWatcher *K8sCiliumNodeWatcher
+	k8sNamespaceWatcher  *K8sNamespaceWatcher
+	k8sServiceWatcher    *K8sServiceWatcher
+	k8sEndpointsWatcher  *K8sEndpointsWatcher
+	k8sCiliumLRPWatcher  *K8sCiliumLRPWatcher
+	//k8sCiliumEndpointsWatcher *K8sCiliumEndpointsWatcher
 
 	// k8sResourceSynced maps a resource name to a channel. Once the given
 	// resource name is synchronized with k8s, the channel for which that
@@ -157,26 +157,26 @@ func newWatcher(
 	k8sServiceWatcher *K8sServiceWatcher,
 	k8sEndpointsWatcher *K8sEndpointsWatcher,
 	k8sCiliumLRPWatcher *K8sCiliumLRPWatcher,
-	k8sCiliumEndpointsWatcher *K8sCiliumEndpointsWatcher,
+	//k8sCiliumEndpointsWatcher *K8sCiliumEndpointsWatcher,
 	k8sEventReporter *K8sEventReporter,
 	k8sResourceSynced *synced.Resources,
 	k8sAPIGroups *synced.APIGroups,
 	cfg WatcherConfiguration,
 ) *K8sWatcher {
 	return &K8sWatcher{
-		resourceGroupsFn:          resourceGroups,
-		clientset:                 clientset,
-		k8sEventReporter:          k8sEventReporter,
-		k8sPodWatcher:             k8sPodWatcher,
-		k8sCiliumNodeWatcher:      k8sCiliumNodeWatcher,
-		k8sNamespaceWatcher:       k8sNamespaceWatcher,
-		k8sServiceWatcher:         k8sServiceWatcher,
-		k8sEndpointsWatcher:       k8sEndpointsWatcher,
-		k8sCiliumLRPWatcher:       k8sCiliumLRPWatcher,
-		k8sCiliumEndpointsWatcher: k8sCiliumEndpointsWatcher,
-		k8sResourceSynced:         k8sResourceSynced,
-		k8sAPIGroups:              k8sAPIGroups,
-		cfg:                       cfg,
+		resourceGroupsFn:     resourceGroups,
+		clientset:            clientset,
+		k8sEventReporter:     k8sEventReporter,
+		k8sPodWatcher:        k8sPodWatcher,
+		k8sCiliumNodeWatcher: k8sCiliumNodeWatcher,
+		k8sNamespaceWatcher:  k8sNamespaceWatcher,
+		k8sServiceWatcher:    k8sServiceWatcher,
+		k8sEndpointsWatcher:  k8sEndpointsWatcher,
+		k8sCiliumLRPWatcher:  k8sCiliumLRPWatcher,
+		//k8sCiliumEndpointsWatcher: k8sCiliumEndpointsWatcher,
+		k8sResourceSynced: k8sResourceSynced,
+		k8sAPIGroups:      k8sAPIGroups,
+		cfg:               cfg,
 	}
 }
 
@@ -355,9 +355,9 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 		case resources.K8sAPIGroupEndpointSliceOrEndpoint:
 			k.k8sEndpointsWatcher.endpointsInit()
 		case k8sAPIGroupCiliumEndpointV2:
-			if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() {
-				k.k8sCiliumEndpointsWatcher.initCiliumEndpointOrSlices(ctx, asyncControllers)
-			}
+			// if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() {
+			// 	k.k8sCiliumEndpointsWatcher.initCiliumEndpointOrSlices(ctx, asyncControllers)
+			// }
 		case k8sAPIGroupCiliumEndpointSliceV2Alpha1:
 			// no-op; handled in k8sAPIGroupCiliumEndpointV2
 		case k8sAPIGroupCiliumLocalRedirectPolicyV2:
