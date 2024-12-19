@@ -83,6 +83,8 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 			// Cilium CDR Group CRD is only used with Cilium Network Policies.
 			// https://docs.cilium.io/en/latest/network/kubernetes/ciliumcidrgroup/
 			cidrGroupEvents = p.ciliumCIDRGroups.Events(ctx)
+		}
+		if p.config.EnableCiliumNetworkPolicy || p.config.EnableK8sNetworkPolicy {
 			// Service Cache Notifications are only used with Cilium Network Policies.
 			serviceEvents = p.svcCacheNotifications
 		}
