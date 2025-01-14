@@ -215,6 +215,7 @@ type watcherInfo struct {
 	group string
 }
 
+// TODO, maybe handle this?
 var ciliumResourceToGroupMapping = map[string]watcherInfo{
 	synced.CRDResourceName(cilium_v2.CNPName):           {waitOnly, k8sAPIGroupCiliumNetworkPolicyV2},            // Handled in pkg/policy/k8s/
 	synced.CRDResourceName(cilium_v2.CCNPName):          {waitOnly, k8sAPIGroupCiliumClusterwideNetworkPolicyV2}, // Handled in pkg/policy/k8s/
@@ -261,6 +262,7 @@ func resourceGroups(cfg WatcherConfiguration) (resourceGroups, waitForCachesOnly
 		// endpoints being restored to have the right identity.
 		// Namespaces are only used when network policies are enabled.
 		k8sGroups = append(k8sGroups, k8sAPIGroupNamespaceV1Core)
+		k8sGroups = append(k8sGroups, k8sAPIGroupCiliumNodeV2)
 	}
 
 	if cfg.K8sNetworkPolicyEnabled() {
@@ -343,11 +345,11 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 			go k.k8sPodWatcher.podsInit(asyncControllers)
 		case k8sAPIGroupNamespaceV1Core:
 			k.k8sNamespaceWatcher.namespacesInit()
-		case k8sAPIGroupCiliumNodeV2:
-			if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() {
-				asyncControllers.Add(1)
-				go k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx, asyncControllers)
-			}
+		// case k8sAPIGroupCiliumNodeV2:
+		// 	// if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() {
+		// 	// 	asyncControllers.Add(1)
+		// 	// 	go k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx, asyncControllers)
+		// 	// }
 		case resources.K8sAPIGroupServiceV1Core:
 			k.k8sServiceWatcher.servicesInit()
 		case resources.K8sAPIGroupEndpointSliceOrEndpoint:
