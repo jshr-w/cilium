@@ -262,7 +262,6 @@ func resourceGroups(cfg WatcherConfiguration) (resourceGroups, waitForCachesOnly
 		// endpoints being restored to have the right identity.
 		// Namespaces are only used when network policies are enabled.
 		k8sGroups = append(k8sGroups, k8sAPIGroupNamespaceV1Core)
-		k8sGroups = append(k8sGroups, k8sAPIGroupCiliumNodeV2)
 	}
 
 	if cfg.K8sNetworkPolicyEnabled() {
@@ -345,11 +344,11 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 			go k.k8sPodWatcher.podsInit(asyncControllers)
 		case k8sAPIGroupNamespaceV1Core:
 			k.k8sNamespaceWatcher.namespacesInit()
-		// case k8sAPIGroupCiliumNodeV2:
-		// 	// if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() {
-		// 	// 	asyncControllers.Add(1)
-		// 	// 	go k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx, asyncControllers)
-		// 	// }
+		case k8sAPIGroupCiliumNodeV2:
+			if !k.cfg.KVstoreEnabledWithoutPodNetworkSupport() || option.NetworkPolicyEnabled(option.Config) {
+				asyncControllers.Add(1)
+				go k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx, asyncControllers)
+			}
 		case resources.K8sAPIGroupServiceV1Core:
 			k.k8sServiceWatcher.servicesInit()
 		case resources.K8sAPIGroupEndpointSliceOrEndpoint:

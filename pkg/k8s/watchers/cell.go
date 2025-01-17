@@ -50,7 +50,7 @@ func newK8sWatcher(params k8sWatcherParams) *K8sWatcher {
 	return newWatcher(
 		params.Clientset,
 		params.K8sPodWatcher,
-		//params.K8sCiliumNodeWatcher,
+		params.K8sCiliumNodeWatcher,
 		params.K8sNamespaceWatcher,
 		params.K8sServiceWatcher,
 		params.K8sEndpointsWatcher,
