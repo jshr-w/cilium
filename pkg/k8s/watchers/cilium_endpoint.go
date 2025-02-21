@@ -7,7 +7,6 @@ import (
 	"context"
 	"log/slog"
 	"net"
-	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
 
@@ -16,12 +15,10 @@ import (
 	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
-	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/source"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
@@ -77,45 +74,46 @@ func (k *K8sCiliumEndpointsWatcher) initCiliumEndpointOrSlices(ctx context.Conte
 	// If CiliumEndpointSlice feature is enabled, Cilium-agent watches CiliumEndpointSlice
 	// objects instead of CiliumEndpoints. Hence, skip watching CiliumEndpoints if CiliumEndpointSlice
 	// feature is enabled.
-	if option.Config.EnableCiliumEndpointSlice {
-		k.ciliumEndpointSliceInit(ctx)
-	} else {
-		k.ciliumEndpointsInit(ctx)
-	}
+	k.ciliumEndpointSliceInit(ctx)
+	// if option.Config.EnableCiliumEndpointSlice {
+	// 	go k.ciliumEndpointSliceInit(ctx, asyncControllers)
+	// } else {
+	// 	k.ciliumEndpointsInit(ctx)
+	// }
 }
 
-func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
-	var synced atomic.Bool
+// func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
+// 	var synced atomic.Bool
 
-	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
-		ctx.Done(),
-		nil,
-		func() bool { return synced.Load() },
-		k8sAPIGroupCiliumEndpointV2,
-	)
-	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumEndpointV2)
+// 	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
+// 		ctx.Done(),
+// 		nil,
+// 		func() bool { return synced.Load() },
+// 		k8sAPIGroupCiliumEndpointV2,
+// 	)
+// 	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumEndpointV2)
 
-	go func() {
-		events := k.resources.CiliumSlimEndpoint.Events(ctx)
-		cache := make(map[resource.Key]*types.CiliumEndpoint)
-		for event := range events {
-			switch event.Kind {
-			case resource.Sync:
-				synced.Store(true)
-			case resource.Upsert:
-				oldObj, ok := cache[event.Key]
-				if !ok || !oldObj.DeepEqual(event.Object) {
-					k.endpointUpdated(oldObj, event.Object)
-					cache[event.Key] = event.Object
-				}
-			case resource.Delete:
-				k.endpointDeleted(event.Object)
-				delete(cache, event.Key)
-			}
-			event.Done(nil)
-		}
-	}()
-}
+// 	go func() {
+// 		events := k.resources.CiliumSlimEndpoint.Events(ctx)
+// 		cache := make(map[resource.Key]*types.CiliumEndpoint)
+// 		for event := range events {
+// 			switch event.Kind {
+// 			case resource.Sync:
+// 				synced.Store(true)
+// 			case resource.Upsert:
+// 				oldObj, ok := cache[event.Key]
+// 				if !ok || !oldObj.DeepEqual(event.Object) {
+// 					k.endpointUpdated(oldObj, event.Object)
+// 					cache[event.Key] = event.Object
+// 				}
+// 			case resource.Delete:
+// 				k.endpointDeleted(event.Object)
+// 				delete(cache, event.Key)
+// 			}
+// 			event.Done(nil)
+// 		}
+// 	}()
+// }
 
 func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
 	var namedPortsChanged bool

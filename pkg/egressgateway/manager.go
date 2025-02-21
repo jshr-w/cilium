@@ -26,8 +26,8 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	identityCache "github.com/cilium/cilium/pkg/identity/cache"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
-	k8sTypes "github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -116,7 +116,8 @@ type Manager struct {
 	ciliumNodes resource.Resource[*cilium_api_v2.CiliumNode]
 
 	// endpoints allows reading endpoint CRD from k8s.
-	endpoints resource.Resource[*k8sTypes.CiliumEndpoint]
+	// endpoints resource.Resource[*k8sTypes.CiliumEndpoint]
+	endpoints resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice]
 
 	// policyConfigs stores policy configs indexed by policyID
 	policyConfigs map[policyID]*PolicyConfig
@@ -166,8 +167,9 @@ type Params struct {
 	PolicyMap6        *egressmap.PolicyMap6
 	Policies          resource.Resource[*Policy]
 	Nodes             resource.Resource[*cilium_api_v2.CiliumNode]
-	Endpoints         resource.Resource[*k8sTypes.CiliumEndpoint]
-	Sysctl            sysctl.Sysctl
+	//Endpoints         resource.Resource[*k8sTypes.CiliumEndpoint]
+	Endpoints resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice]
+	Sysctl    sysctl.Sysctl
 
 	Lifecycle cell.Lifecycle
 }
@@ -450,80 +452,84 @@ func (manager *Manager) onDeleteEgressPolicy(policy *Policy) {
 	manager.reconciliationTrigger.TriggerWithReason("policy deleted")
 }
 
-func (manager *Manager) addEndpoint(endpoint *k8sTypes.CiliumEndpoint) error {
-	var epData *endpointMetadata
-	var err error
-	var identityLabels labels.Labels
+// func (manager *Manager) addEndpoint(endpoint *k8sTypes.CiliumEndpoint) error {
+func (manager *Manager) addEndpoint(endpoint *cilium_api_v2alpha1.CiliumEndpointSlice) error {
+	return nil // TODO
+	// var epData *endpointMetadata
+	// var err error
+	// var identityLabels labels.Labels
 
-	manager.Lock()
-	defer manager.Unlock()
+	// manager.Lock()
+	// defer manager.Unlock()
 
-	logger := manager.logger.With(
-		logfields.K8sEndpointName, endpoint.Name,
-		logfields.K8sNamespace, endpoint.Namespace,
-		logfields.K8sUID, endpoint.UID,
-	)
+	// logger := manager.logger.With(
+	// 	logfields.K8sEndpointName, endpoint.Name,
+	// 	logfields.K8sNamespace, endpoint.Namespace,
+	// 	logfields.K8sUID, endpoint.UID,
+	// )
 
-	if endpoint.Identity == nil {
-		logger.Warn(
-			"Endpoint is missing identity metadata, skipping update to egress policy.",
-		)
-		return nil
-	}
+	// if endpoint.Identity == nil {
+	// 	logger.Warn(
+	// 	"Endpoint is missing identity metadata, skipping update to egress policy.",
+	// )
+	// 	return nil
+	// }
 
-	if identityLabels, err = manager.getIdentityLabels(uint32(endpoint.Identity.ID)); err != nil {
-		logger.Warn(
-			"Failed to get identity labels for endpoint",
-			logfields.Error, err,
-		)
-		return err
-	}
+	// if identityLabels, err = manager.getIdentityLabels(uint32(endpoint.Identity.ID)); err != nil {
+	// 	logger.Warn(
+	// 		"Failed to get identity labels for endpoint",
+	// 	logfields.Error, err,
+	// )
+	// 	return err
+	// }
 
-	if epData, err = getEndpointMetadata(endpoint, identityLabels); err != nil {
-		logger.Error(
-			"Failed to get valid endpoint metadata, skipping update to egress policy.",
-			logfields.Error, err,
-		)
-		return nil
-	}
+	// if epData, err = getEndpointMetadata(endpoint, identityLabels); err != nil {
+	// 	logger.Error(
+	// 		"Failed to get valid endpoint metadata, skipping update to egress policy.",
+	// 	logfields.Error, err,
+	// )
+	// 	return nil
+	// }
 
-	if _, ok := manager.epDataStore[epData.id]; ok {
-		logger.Debug(
-			"Updated CiliumEndpoint",
-			logfields.Error, err,
-		)
-	} else {
-		logger.Debug(
-			"Added CiliumEndpoint",
-			logfields.Error, err,
-		)
-	}
+	// if _, ok := manager.epDataStore[epData.id]; ok {
+	// 	logger.Debug(
+	// 	"Updated CiliumEndpoint",
+	// 	logfields.Error, err,
+	// )
+	// } else {
+	// 	logger.Debug(
+	// 	"Added CiliumEndpoint",
+	// 	logfields.Error, err,
+	// )
+	// }
 
-	manager.epDataStore[epData.id] = epData
+	// manager.epDataStore[epData.id] = epData
 
-	manager.setEventBitmap(eventUpdateEndpoint)
-	manager.reconciliationTrigger.TriggerWithReason("endpoint updated")
+	// manager.setEventBitmap(eventUpdateEndpoint)
+	// manager.reconciliationTrigger.TriggerWithReason("endpoint updated")
 
-	return nil
+	// return nil
 }
 
-func (manager *Manager) deleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
-	manager.Lock()
-	defer manager.Unlock()
+// func (manager *Manager) deleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
+func (manager *Manager) deleteEndpoint(endpoint *cilium_api_v2alpha1.CiliumEndpointSlice) {
+	// manager.Lock()
+	// defer manager.Unlock()
 
-	manager.logger.Debug(
-		"Deleted CiliumEndpoint",
-		logfields.K8sEndpointName, endpoint.Name,
-		logfields.K8sNamespace, endpoint.Namespace,
-		logfields.K8sUID, endpoint.UID,
-	)
-	delete(manager.epDataStore, endpoint.UID)
+	// manager.logger.Debug(
+	// 	"Deleted CiliumEndpoint",
+	// 	logfields.K8sEndpointName, endpoint.Name,
+	// 	logfields.K8sNamespace, endpoint.Namespace,
+	// 	logfields.K8sUID, endpoint.UID,
+	// )
+	// delete(manager.epDataStore, endpoint.UID)
 
-	manager.setEventBitmap(eventDeleteEndpoint)
-	manager.reconciliationTrigger.TriggerWithReason("endpoint deleted")
+	// manager.setEventBitmap(eventDeleteEndpoint)
+	// manager.reconciliationTrigger.TriggerWithReason("endpoint deleted")
 }
 
-func (manager *Manager) handleEndpointEvent(event resource.Event[*k8sTypes.CiliumEndpoint]) {
+// func (manager *Manager) handleEndpointEvent(event resource.Event[*k8sTypes.CiliumEndpoint]) {
+func (manager *Manager) handleEndpointEvent(event resource.Event[*cilium_api_v2alpha1.CiliumEndpointSlice]) {
 	endpoint := event.Object
 
 	if event.Kind == resource.Upsert {

@@ -15,6 +15,7 @@ import (
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AnnotationsEqual returns whether the annotation with any key in
@@ -362,5 +363,73 @@ func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCi
 		},
 		Networking: ccep.Networking,
 		NamedPorts: ccep.NamedPorts,
+	}
+}
+
+// TransformToCiliumEndpointSlice transforms a *cilium_v2.CiliumEndpoint into a
+// *cilium_v2alpha1.CiliumEndpointSlice or a cache.DeletedFinalStateUnknown into a
+// cache.DeletedFinalStateUnknown with a *cilium_v2alpha1.CiliumEndpointSlice in its Obj.
+// If obj is a *cilium_v2alpha1.CiliumEndpointSlice or a cache.DeletedFinalStateUnknown with
+// a *cilium_v2alpha1.CiliumEndpointSlice in its Obj, obj is returned without any transformations.
+// If the given obj can't be cast into either *cilium_v2alpha1.CiliumEndpointSlice nor
+// cache.DeletedFinalStateUnknown, an error is returned.
+func TransformToCiliumEndpointSlice(obj interface{}) (interface{}, error) {
+	switch concreteObj := obj.(type) {
+	case *cilium_v2.CiliumEndpoint:
+		return &cilium_v2alpha1.CiliumEndpointSlice{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       concreteObj.TypeMeta.Kind,
+				APIVersion: concreteObj.TypeMeta.APIVersion,
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            concreteObj.ObjectMeta.Name,
+				Namespace:       concreteObj.ObjectMeta.Namespace,
+				UID:             concreteObj.ObjectMeta.UID,
+				ResourceVersion: concreteObj.ObjectMeta.ResourceVersion,
+				// We don't need to store labels nor annotations because
+				// they are not used by the CEP handlers.
+				Labels:      nil,
+				Annotations: nil,
+			},
+			Namespace: concreteObj.ObjectMeta.Namespace,
+			Endpoints: []cilium_v2alpha1.CoreCiliumEndpoint{
+				*ConvertCEPToCoreCEP(concreteObj),
+			},
+		}, nil
+	case *cilium_v2alpha1.CiliumEndpointSlice:
+		return obj, nil
+	case cache.DeletedFinalStateUnknown:
+		if _, ok := concreteObj.Obj.(*cilium_v2alpha1.CiliumEndpointSlice); ok {
+			return obj, nil
+		}
+		ciliumEndpoint, ok := concreteObj.Obj.(*cilium_v2.CiliumEndpoint)
+		if !ok {
+			return nil, fmt.Errorf("unknown object type %T", concreteObj.Obj)
+		}
+		return cache.DeletedFinalStateUnknown{
+			Key: concreteObj.Key,
+			Obj: &cilium_v2alpha1.CiliumEndpointSlice{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "CiliumEndpointSlice",
+					APIVersion: "v2alpha1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            ciliumEndpoint.ObjectMeta.Name,
+					Namespace:       ciliumEndpoint.ObjectMeta.Namespace,
+					UID:             ciliumEndpoint.ObjectMeta.UID,
+					ResourceVersion: ciliumEndpoint.ObjectMeta.ResourceVersion,
+					// We don't need to store labels nor annotations because
+					// they are not used by the CEP handlers.
+					Labels:      nil,
+					Annotations: nil,
+				},
+				Namespace: ciliumEndpoint.ObjectMeta.Namespace,
+				Endpoints: []cilium_v2alpha1.CoreCiliumEndpoint{
+					*ConvertCEPToCoreCEP(ciliumEndpoint),
+				},
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown object type %T", concreteObj)
 	}
 }

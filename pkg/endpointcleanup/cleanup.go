@@ -38,11 +38,11 @@ type localEndpointCache interface {
 type params struct {
 	cell.In
 
-	Logger              *slog.Logger
-	Lifecycle           cell.Lifecycle
-	JobGroup            job.Group
-	Health              cell.Health
-	CiliumEndpoint      resource.Resource[*types.CiliumEndpoint]
+	Logger    *slog.Logger
+	Lifecycle cell.Lifecycle
+	JobGroup  job.Group
+	Health    cell.Health
+	//CiliumEndpoint      resource.Resource[*types.CiliumEndpoint]
 	CiliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	Clientset           k8sClient.Clientset
 	RestorerPromise     promise.Promise[endpointstate.Restorer]
@@ -78,8 +78,8 @@ func registerCleanup(p params) {
 	}
 
 	cleanup := &cleanup{
-		log:                        p.Logger,
-		ciliumEndpoint:             p.CiliumEndpoint,
+		log: p.Logger,
+		//ciliumEndpoint:             p.CiliumEndpoint,
 		ciliumEndpointSlice:        p.CiliumEndpointSlice,
 		ciliumClient:               p.Clientset.CiliumV2(),
 		restorerPromise:            p.RestorerPromise,
@@ -121,7 +121,7 @@ func (c *cleanup) run(ctx context.Context) error {
 		if c.ciliumEndpointSliceEnabled {
 			err = c.cleanStaleCESs(ctx)
 		} else {
-			err = c.cleanStaleCEPs(ctx)
+			//err = c.cleanStaleCEPs(ctx)
 		}
 		if err != nil {
 			retries++

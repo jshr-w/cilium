@@ -32,6 +32,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/promise"
 )
 
@@ -45,12 +46,15 @@ type Config struct {
 	// the label is not present. For more details -
 	// https://github.com/kubernetes/enhancements/tree/master/keps/sig-network/2447-Make-kube-proxy-service-abstraction-optional
 	K8sServiceProxyName string
+
+	//EnableCiliumEndpointSlice bool
 }
 
 // DefaultConfig represents the default k8s resources config values.
 var DefaultConfig = Config{
 	EnableK8sEndpointSlice: true,
 	K8sServiceProxyName:    "",
+	//EnableCiliumEndpointSlice: false,
 }
 
 const (
@@ -63,6 +67,7 @@ func (def Config) Flags(flags *pflag.FlagSet) {
 	flags.Bool("enable-k8s-endpoint-slice", def.EnableK8sEndpointSlice, "Enables k8s EndpointSlice feature in Cilium if the k8s cluster supports it")
 	flags.MarkDeprecated("enable-k8s-endpoint-slice", "The flag will be removed in v1.19. The feature will be unconditionally enabled by default.")
 	flags.String("k8s-service-proxy-name", def.K8sServiceProxyName, "Value of K8s service-proxy-name label for which Cilium handles the services (empty = all services without service.kubernetes.io/service-proxy-name label)")
+	//flags.Bool("enable-cilium-endpoint-slice", def.EnableCiliumEndpointSlice, "Enables CiliumEndpointSlice feature in Cilium")
 }
 
 // namespaceIndexFunc is an IndexFunc that indexes Namespace of Kubernetes
@@ -403,32 +408,89 @@ func transformEndpoint(logger *slog.Logger, obj any) (any, error) {
 	}
 }
 
-// CiliumSlimEndpointResource uses the "localNode" IndexFunc to build the resource indexer.
+// CiliumEndpointSliceResource uses the "localNode" IndexFunc to build the resource indexer.
 // The IndexFunc accesses the local node info to get its IP, so it depends on the local node store
 // to initialize it before the first access.
 // To reflect this, the node.LocalNodeStore dependency is explicitly requested in the function
 // signature.
-func CiliumSlimEndpointResource(params CiliumResourceParams, _ *node.LocalNodeStore, opts ...func(*metav1.ListOptions)) (resource.Resource[*types.CiliumEndpoint], error) {
+func CiliumEndpointSliceResource(params CiliumResourceParams, _ *node.LocalNodeStore, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice], error) {
 	if !params.ClientSet.IsEnabled() {
 		return nil, nil
 	}
-	lw := utils.ListerWatcherWithModifiers(
-		utils.ListerWatcherFromTyped[*cilium_api_v2.CiliumEndpointList](params.ClientSet.CiliumV2().CiliumEndpoints(slim_corev1.NamespaceAll)),
-		opts...,
-	)
+
+	lw := &ciliumEndpointsListerWatcher{
+		cs: params.ClientSet,
+		// The option values should be set before this call (?)
+		enableCiliumEndpointSlice: option.Config.EnableCiliumEndpointSlice,
+	}
+
 	indexers := cache.Indexers{
 		"localNode": func(obj any) ([]string, error) {
-			return ciliumEndpointLocalPodIndexFunc(params.Logger, obj)
+			return ciliumEndpointSliceLocalPodIndexFunc(params.Logger, obj)
 		},
 	}
-	return resource.New[*types.CiliumEndpoint](params.Lifecycle, lw,
-		resource.WithLazyTransform(func() k8sRuntime.Object {
-			return &cilium_api_v2.CiliumEndpoint{}
-		}, TransformToCiliumEndpoint),
-		resource.WithMetric("CiliumEndpoint"),
+	// if option.Config.EnableCiliumEndpointSlice {
+	// 	indexers["localNode"] = ciliumEndpointSliceLocalPodIndexFunc
+	// } else {
+	// 	indexers["localNode"] = ciliumEndpointLocalPodIndexFunc
+	// }
+	// indexers["localNode"] = ciliumEndpointSliceLocalPodIndexFunc
+
+	return resource.New[*cilium_api_v2alpha1.CiliumEndpointSlice](params.Lifecycle, lw,
+		resource.WithLazyTransform(lw.getSourceObj, func(i any) (any, error) {
+			return TransformToCiliumEndpointSlice(i)
+		}),
+		// resource.WithLazyTransform(func() k8sRuntime.Object {
+		// 	return &cilium_api_v2alpha1.CiliumEndpointSlice{}
+		// }, TransformToCiliumEndpointSlice),
+		resource.WithMetric("CiliumEndpointSlice"),
 		resource.WithIndexers(indexers),
 		resource.WithCRDSync(params.CRDSyncPromise),
 	), nil
+}
+
+// ciliumEndpointsListerWatcher implements List and Watch for CiliumEndpoints/CiliumEndpointSlices. It
+// performs the capability check on first call to List/Watch. This allows constructing
+// the resource before the client has been started and capabilities have been probed.
+type ciliumEndpointsListerWatcher struct {
+	cs                        client.Clientset
+	enableCiliumEndpointSlice bool
+	sourceObj                 k8sRuntime.Object
+
+	once                sync.Once
+	cachedListerWatcher cache.ListerWatcher
+}
+
+func (lw *ciliumEndpointsListerWatcher) getSourceObj() k8sRuntime.Object {
+	lw.getListerWatcher() // force the construction
+	return lw.sourceObj
+}
+
+func (lw *ciliumEndpointsListerWatcher) getListerWatcher() cache.ListerWatcher {
+	lw.once.Do(func() {
+		if option.Config.EnableCiliumEndpointSlice {
+			//log.Info("Using CiliumEndpointSlice")
+			lw.cachedListerWatcher = utils.ListerWatcherFromTyped[*cilium_api_v2alpha1.CiliumEndpointSliceList](
+				lw.cs.CiliumV2alpha1().CiliumEndpointSlices(),
+			)
+			lw.sourceObj = &cilium_api_v2alpha1.CiliumEndpointSlice{}
+		} else {
+			//log.Info("Using CiliumEndpoint")
+			lw.cachedListerWatcher = utils.ListerWatcherFromTyped[*cilium_api_v2.CiliumEndpointList](
+				lw.cs.CiliumV2().CiliumEndpoints(""),
+			)
+			lw.sourceObj = &cilium_api_v2.CiliumEndpoint{}
+		}
+	})
+	return lw.cachedListerWatcher
+}
+
+func (lw *ciliumEndpointsListerWatcher) List(opts metav1.ListOptions) (k8sRuntime.Object, error) {
+	return lw.getListerWatcher().List(opts)
+}
+
+func (lw *ciliumEndpointsListerWatcher) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return lw.getListerWatcher().Watch(opts)
 }
 
 // ciliumEndpointLocalPodIndexFunc is an IndexFunc that indexes only local
@@ -450,31 +512,6 @@ func ciliumEndpointLocalPodIndexFunc(logger *slog.Logger, obj any) ([]string, er
 		indices = append(indices, cep.Networking.NodeIP)
 	}
 	return indices, nil
-}
-
-// CiliumEndpointSliceResource uses the "localNode" IndexFunc to build the resource indexer.
-// The IndexFunc accesses the local node info to get its IP, so it depends on the local node store
-// to initialize it before the first access.
-// To reflect this, the node.LocalNodeStore dependency is explicitly requested in the function
-// signature.
-func CiliumEndpointSliceResource(params CiliumResourceParams, _ *node.LocalNodeStore, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice], error) {
-	if !params.ClientSet.IsEnabled() {
-		return nil, nil
-	}
-	lw := utils.ListerWatcherWithModifiers(
-		utils.ListerWatcherFromTyped[*cilium_api_v2alpha1.CiliumEndpointSliceList](params.ClientSet.CiliumV2alpha1().CiliumEndpointSlices()),
-		opts...,
-	)
-	indexers := cache.Indexers{
-		"localNode": func(obj any) ([]string, error) {
-			return ciliumEndpointSliceLocalPodIndexFunc(params.Logger, obj)
-		},
-	}
-	return resource.New[*cilium_api_v2alpha1.CiliumEndpointSlice](params.Lifecycle, lw,
-		resource.WithMetric("CiliumEndpointSlice"),
-		resource.WithIndexers(indexers),
-		resource.WithCRDSync(params.CRDSyncPromise),
-	), nil
 }
 
 // ciliumEndpointSliceLocalPodIndexFunc is an IndexFunc that indexes CiliumEndpointSlices
