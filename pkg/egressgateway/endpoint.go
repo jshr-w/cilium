@@ -29,6 +29,7 @@ type endpointMetadata struct {
 // endpointID is based on endpoint's UID
 type endpointID = types.UID
 
+// TODO
 func getEndpointMetadata(endpoint *k8sTypes.CiliumEndpoint, identityLabels labels.Labels) (*endpointMetadata, error) {
 	var addrs []netip.Addr
 

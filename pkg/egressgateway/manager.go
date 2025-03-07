@@ -6,7 +6,6 @@ package egressgateway
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -26,6 +25,7 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	identityCache "github.com/cilium/cilium/pkg/identity/cache"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sTypes "github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/labels"
@@ -111,7 +111,8 @@ type Manager struct {
 	ciliumNodes resource.Resource[*cilium_api_v2.CiliumNode]
 
 	// endpoints allows reading endpoint CRD from k8s.
-	endpoints resource.Resource[*k8sTypes.CiliumEndpoint]
+	// endpoints resource.Resource[*k8sTypes.CiliumEndpoint]
+	endpoints resource.Resource[*v2alpha1.CiliumEndpointSlice]
 
 	// policyConfigs stores policy configs indexed by policyID
 	policyConfigs map[policyID]*PolicyConfig
@@ -159,7 +160,7 @@ type Params struct {
 	PolicyMap         egressmap.PolicyMap
 	Policies          resource.Resource[*Policy]
 	Nodes             resource.Resource[*cilium_api_v2.CiliumNode]
-	Endpoints         resource.Resource[*k8sTypes.CiliumEndpoint]
+	Endpoints         resource.Resource[*v2alpha1.CiliumEndpointSlice] //Endpoints         resource.Resource[*k8sTypes.CiliumEndpoint]
 	Sysctl            sysctl.Sysctl
 
 	Lifecycle cell.Lifecycle
@@ -182,9 +183,10 @@ func NewEgressGatewayManager(p Params) (out struct {
 		return out, fmt.Errorf("egress gateway is not supported in %s identity allocation mode", dcfg.IdentityAllocationMode)
 	}
 
-	if dcfg.EnableCiliumEndpointSlice {
-		return out, errors.New("egress gateway is not supported in combination with the CiliumEndpointSlice feature")
-	}
+	// TEMP: UUID may still be an issue
+	// if dcfg.EnableCiliumEndpointSlice {
+	// 	return out, errors.New("egress gateway is not supported in combination with the CiliumEndpointSlice feature")
+	// }
 
 	if !dcfg.EnableIPv4Masquerade || !dcfg.EnableBPFMasquerade {
 		return out, fmt.Errorf("egress gateway requires --%s=\"true\" and --%s=\"true\"", option.EnableIPv4Masquerade, option.EnableBPFMasquerade)
@@ -357,7 +359,7 @@ func (manager *Manager) processEvents(ctx context.Context) {
 				maybeTriggerReconcile()
 				event.Done(nil)
 			} else {
-				manager.handleEndpointEvent(event)
+				manager.handleEndpointEvent(event) // TODO
 			}
 		}
 	}
@@ -427,6 +429,7 @@ func (manager *Manager) onDeleteEgressPolicy(policy *Policy) {
 	manager.reconciliationTrigger.TriggerWithReason("policy deleted")
 }
 
+// TODO
 func (manager *Manager) addEndpoint(endpoint *k8sTypes.CiliumEndpoint) error {
 	var epData *endpointMetadata
 	var err error
@@ -452,6 +455,7 @@ func (manager *Manager) addEndpoint(endpoint *k8sTypes.CiliumEndpoint) error {
 		return err
 	}
 
+	// TODO
 	if epData, err = getEndpointMetadata(endpoint, identityLabels); err != nil {
 		logger.WithError(err).
 			Error("Failed to get valid endpoint metadata, skipping update to egress policy.")
@@ -472,23 +476,28 @@ func (manager *Manager) addEndpoint(endpoint *k8sTypes.CiliumEndpoint) error {
 	return nil
 }
 
-func (manager *Manager) deleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
+// TODO
+// func (manager *Manager) deleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
+func (manager *Manager) deleteEndpoint(endpoint *v2alpha1.CiliumEndpointSlice) {
 	manager.Lock()
 	defer manager.Unlock()
 
-	logger := log.WithFields(logrus.Fields{
-		logfields.K8sEndpointName: endpoint.Name,
-		logfields.K8sNamespace:    endpoint.Namespace,
-		logfields.K8sUID:          endpoint.UID,
-	})
+	for _, ep := range endpoint.Endpoints {
+		logger := log.WithFields(logrus.Fields{
+			logfields.K8sEndpointName: endpoint.Name,
+			logfields.K8sNamespace:    endpoint.Namespace,
+			logfields.K8sUID:          endpoint.UID,
+		})
 
-	logger.Debug("Deleted CiliumEndpoint")
-	delete(manager.epDataStore, endpoint.UID)
+		logger.Debug("Deleted CiliumEndpoint")
+		delete(manager.epDataStore, endpoint.UID)
+	}
 
 	manager.setEventBitmap(eventDeleteEndpoint)
 	manager.reconciliationTrigger.TriggerWithReason("endpoint deleted")
 }
 
+// TODO
 func (manager *Manager) handleEndpointEvent(event resource.Event[*k8sTypes.CiliumEndpoint]) {
 	endpoint := event.Object
 

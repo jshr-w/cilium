@@ -16,6 +16,8 @@ import (
 	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
+	"github.com/cilium/cilium/pkg/k8s"
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/k8s/types"
@@ -108,9 +110,11 @@ func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context, asy
 		go func() {
 			defer close(stop)
 
-			events := k.resources.CiliumSlimEndpoint.Events(eventsCtx)
-			cache := make(map[resource.Key]*types.CiliumEndpoint)
-			for event := range events {
+			// Changed from CiliumSlimEndpoint to transparent type CiliumEndpointSlice,
+			// will this be ok?
+			events := k.resources.CiliumEndpointSlice.Events(eventsCtx)
+			cache := make(map[resource.Key]*v2alpha1.CiliumEndpointSlice)
+			for event := range events { // If CEP, only gets CEP events. Else CES events.
 				var err error
 				switch event.Kind {
 				case resource.Sync:
@@ -118,11 +122,18 @@ func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context, asy
 				case resource.Upsert:
 					oldObj, ok := cache[event.Key]
 					if !ok || !oldObj.DeepEqual(event.Object) {
-						k.endpointUpdated(oldObj, event.Object)
+						for _, ep := range event.Object.Endpoints {
+							for _, oldep := range oldObj.Endpoints {
+								k.endpointUpdated(k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&oldep, oldObj.Namespace),
+									k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, event.Object.Namespace))
+							}
+						}
 						cache[event.Key] = event.Object
 					}
 				case resource.Delete:
-					k.endpointDeleted(event.Object)
+					for _, ep := range event.Object.Endpoints {
+						k.endpointDeleted(k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&ep, event.Object.Namespace))
+					}
 					delete(cache, event.Key)
 				}
 				event.Done(err)

@@ -39,8 +39,7 @@ var (
 			k8s.CiliumClusterwideNetworkPolicyResource,
 			k8s.CiliumCIDRGroupResource,
 			k8s.CiliumNodeResource,
-			k8s.CiliumSlimEndpointResource,
-			//k8s.CiliumEndpointSliceResource,
+			k8s.CiliumEndpointSliceResource,
 			k8s.CiliumEnvoyConfigResource,
 			k8s.CiliumClusterwideEnvoyConfigResource,
 		),
@@ -92,9 +91,8 @@ type Resources struct {
 	CiliumNetworkPolicies            resource.Resource[*cilium_api_v2.CiliumNetworkPolicy]
 	CiliumClusterwideNetworkPolicies resource.Resource[*cilium_api_v2.CiliumClusterwideNetworkPolicy]
 	CiliumCIDRGroups                 resource.Resource[*cilium_api_v2alpha1.CiliumCIDRGroup]
-	//CiliumSlimEndpoint               resource.Resource[*types.CiliumEndpoint]
-	CiliumEndpointSlice resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice]
-	CiliumNode          resource.Resource[*cilium_api_v2.CiliumNode]
+	CiliumEndpointSlice              resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice]
+	CiliumNode                       resource.Resource[*cilium_api_v2.CiliumNode]
 }
 
 // LocalNodeResources is a convenience struct to group CiliumNode and Node resources as cell constructor parameters.
