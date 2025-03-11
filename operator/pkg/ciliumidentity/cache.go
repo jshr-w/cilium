@@ -166,6 +166,20 @@ func (c *CIDUsageInPods) AssignCIDToPod(podName, cidName string) (string, int) {
 	return prevCIDName, prevCIDUsageCount
 }
 
+// // GetPodCID returns the CID name for the given pod name. If the pod
+// // does not exist in the pod to CID map, it returns empty values.
+// func (c *CIDUsageInPods) GetPodCID(podName string) (string, bool) {
+// 	c.mu.RLock()
+// 	defer c.mu.RUnlock()
+
+// 	cidName, exists := c.podToCID[podName]
+// 	if !exists {
+// 		return "", false
+// 	}
+
+// 	return cidName, true
+// }
+
 // RemovePod removes the pod from the pod to CID map, decrements the CID usage
 // and returns the CID name and its usage count after decrementing the usage.
 // If the pod does not exist in the pod to CID map it returns empty values.

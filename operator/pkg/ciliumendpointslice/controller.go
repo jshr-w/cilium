@@ -15,6 +15,7 @@ import (
 	"github.com/cilium/workerpool"
 	"k8s.io/client-go/util/workqueue"
 
+	"github.com/cilium/cilium/pkg/ipcache"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
@@ -36,6 +37,9 @@ type params struct {
 	CiliumEndpointSlice resource.Resource[*v2alpha1.CiliumEndpointSlice]
 	CiliumNodes         resource.Resource[*v2.CiliumNode]
 	Namespace           resource.Resource[*slim_corev1.Namespace]
+	Pods                resource.Resource[*slim_corev1.Pod]
+	IPCache             *ipcache.IPCache
+	//CiliumIdentity      resource.Resource[*v2.CiliumIdentity]
 
 	Cfg       Config
 	SharedCfg SharedConfig
@@ -56,6 +60,10 @@ type Controller struct {
 	ciliumEndpointSlice resource.Resource[*v2alpha1.CiliumEndpointSlice]
 	ciliumNodes         resource.Resource[*v2.CiliumNode]
 	namespace           resource.Resource[*slim_corev1.Namespace]
+	pods                resource.Resource[*slim_corev1.Pod]
+	ipcache             ipcacheManager
+	//ciliumIdentity      resource.Resource[*v2.CiliumIdentity]
+
 	// reconciler is an util used to reconcile CiliumEndpointSlice changes.
 	reconciler *reconciler
 
@@ -96,6 +104,10 @@ type Controller struct {
 	Job job.Group
 }
 
+type ipcacheManager interface {
+	LookupByIP(ip string) (ipcache.Identity, bool)
+}
+
 // registerController creates and initializes the CES controller
 func registerController(p params) error {
 	clientset, err := p.NewClient("ciliumendpointslice-controller")
@@ -116,7 +128,6 @@ func registerController(p params) error {
 	cesController := &Controller{
 		logger:              p.Logger,
 		clientset:           clientset,
-		ciliumEndpoint:      p.CiliumEndpoint,
 		ciliumEndpointSlice: p.CiliumEndpointSlice,
 		ciliumNodes:         p.CiliumNodes,
 		namespace:           p.Namespace,
@@ -128,6 +139,14 @@ func registerController(p params) error {
 		priorityNamespaces:  make(map[string]struct{}),
 		cond:                *sync.NewCond(&lock.Mutex{}),
 		Job:                 p.Job,
+	}
+	// TODO: Is this correct? Or toggle based on OperatorManagingIdentities? Will this
+	// panic if one of these is left nil?
+	if p.Pods == nil {
+		cesController.ciliumEndpoint = p.CiliumEndpoint
+	} else {
+		cesController.pods = p.Pods
+		cesController.ipcache = p.IPCache // TODO: Will this work without operator managing identities?
 	}
 	p.Lifecycle.Append(cesController)
 	return nil

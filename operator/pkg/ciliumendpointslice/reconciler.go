@@ -11,11 +11,11 @@ import (
 
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -26,9 +26,11 @@ type reconciler struct {
 	client     clientset.CiliumV2alpha1Interface
 	context    context.Context
 	cesManager operations
-	cepStore   resource.Store[*cilium_v2.CiliumEndpoint]
-	cesStore   resource.Store[*cilium_v2a1.CiliumEndpointSlice]
-	metrics    *Metrics
+	//cepStore   resource.Store[*cilium_v2.CiliumEndpoint] Do we want this if operator is not managing identities?
+	podStore resource.Store[*slim_corev1.Pod]
+	cesStore resource.Store[*cilium_v2a1.CiliumEndpointSlice]
+	//cidStore resource.Store[*cilium_v2.CiliumIdentity]
+	metrics *Metrics
 }
 
 // newReconciler creates and initializes a new reconciler.
@@ -37,20 +39,26 @@ func newReconciler(
 	client clientset.CiliumV2alpha1Interface,
 	cesMgr operations,
 	logger *slog.Logger,
-	ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint],
+	pod resource.Resource[*slim_corev1.Pod],
+	//ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint],
 	ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice],
+	//ciliumIdentity resource.Resource[*cilium_v2.CiliumIdentity],
 	metrics *Metrics,
 ) *reconciler {
-	cepStore, _ := ciliumEndpoint.Store(ctx)
+	//cepStore, _ := ciliumEndpoint.Store(ctx)
+	podStore, _ := pod.Store(ctx)
 	cesStore, _ := ciliumEndpointSlice.Store(ctx)
+	//cidStore, _ := ciliumIdentity.Store(ctx)
 	return &reconciler{
 		context:    ctx,
 		logger:     logger,
 		client:     client,
 		cesManager: cesMgr,
-		cepStore:   cepStore,
-		cesStore:   cesStore,
-		metrics:    metrics,
+		//cepStore:   cepStore,
+		podStore: podStore,
+		cesStore: cesStore,
+		//cidStore: cidStore,
+		metrics: metrics,
 	}
 }
 
@@ -196,9 +204,12 @@ func (r *reconciler) reconcileCESDelete(ces *cilium_v2a1.CiliumEndpointSlice) (e
 }
 
 func (r *reconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.CoreCiliumEndpoint {
-	cepObj, exists, err := r.cepStore.GetByKey(cepName.key())
+	//cepObj, exists, err := r.cepStore.GetByKey(cepName.key())
+	podObj, exists, err := r.podStore.GetByKey(cepName.key())
 	if err == nil && exists {
-		return k8s.ConvertCEPToCoreCEP(cepObj)
+		// todo
+		return convertPodToCEP(podObj)
+		//return k8s.ConvertCEPToCoreCEP(cepObj)
 	}
 	r.logger.Debug(fmt.Sprintf("Couldn't get CEP from Store (err=%v, exists=%v)",
 		err, exists),

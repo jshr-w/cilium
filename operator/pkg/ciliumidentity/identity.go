@@ -37,6 +37,9 @@ func (c *Controller) processCiliumIdentityEvents(ctx context.Context, wg *sync.W
 		if event.Kind == resource.Sync {
 			wg.Done()
 		}
+		//tmp
+		//cid := event.Object.DeepCopy()
+		//cid.SecurityLabels
 
 		if event.Kind == resource.Upsert || event.Kind == resource.Delete {
 			c.logger.Debug("Got CID event",

@@ -5,6 +5,7 @@ package ciliumendpointslice
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	"github.com/cilium/hive/cell"
@@ -13,10 +14,14 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/util/workqueue"
 
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	capi_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -74,6 +79,25 @@ func (c *Controller) onEndpointDelete(cep *cilium_api_v2.CiliumEndpoint) {
 	touchedCES := c.manager.RemoveCEPMapping(k8s.ConvertCEPToCoreCEP(cep), cep.Namespace)
 	c.enqueueCESReconciliation([]CESKey{touchedCES})
 }
+
+// TODO
+func (c *Controller) onPodUpdate(pod *slim_corev1.Pod) {
+	coreCep, err := k8s.ConvertPodToCoreCEP(pod)
+
+	// TODO: The conditions here depend on what c.UpdatePodMapping needs.
+	if pod.Status.Networking == nil || pod.GetName() == "" || pod.Namespace == "" {
+		return
+	}
+	touchedCESs := c.manager.UpdatePodMapping(pod)
+	c.enqueueCESReconciliation(touchedCESs)
+}
+
+func (c *Controller) onPodDelete(pod *slim_corev1.Pod) {
+	touchedCES := c.manager.RemovePodMapping(pod)
+	c.enqueueCESReconciliation([]CESKey{touchedCES})
+}
+
+// ENDTODO
 
 func (c *Controller) onSliceUpdate(ces *capi_v2a1.CiliumEndpointSlice) {
 	c.enqueueCESReconciliation([]CESKey{NewCESKey(ces.Name, ces.Namespace)})
@@ -151,7 +175,8 @@ func (c *Controller) Start(ctx cell.HookContext) error {
 
 	c.manager = newCESManager(c.maxCEPsInCES, c.logger)
 
-	c.reconciler = newReconciler(c.context, c.clientset.CiliumV2alpha1(), c.manager, c.logger, c.ciliumEndpoint, c.ciliumEndpointSlice, c.metrics)
+	// TODO: This should be initialized with pod sometimes?
+	c.reconciler = newReconciler(c.context, c.clientset.CiliumV2alpha1(), c.manager, c.logger, c.pods, c.ciliumEndpointSlice, c.metrics)
 
 	c.initializeQueue()
 
@@ -165,10 +190,13 @@ func (c *Controller) Start(ctx cell.HookContext) error {
 		}),
 	)
 	// Start the work pools processing CEP events only after syncing CES in local cache.
-	c.wp = workerpool.New(3)
-	c.wp.Submit("cilium-endpoints-updater", c.runCiliumEndpointsUpdater)
+	c.wp = workerpool.New(4) // TODO, fix
+	// TODO, want a CiliumPodsUpdater instead
+	//c.wp.Submit("cilium-endpoints-updater", c.runCiliumEndpointsUpdater)
+	c.wp.Submit("cilium-pods-updater", c.runPodUpdater)
 	c.wp.Submit("cilium-endpoint-slices-updater", c.runCiliumEndpointSliceUpdater)
 	c.wp.Submit("cilium-nodes-updater", c.runCiliumNodesUpdater)
+	c.wp.Submit("cilium-identities-updater", c.runCiliumIdentityUpdater)
 
 	c.logger.Info("Starting CES controller reconciler.")
 	c.Job.Add(
@@ -236,6 +264,38 @@ func (c *Controller) runCiliumNodesUpdater(ctx context.Context) error {
 	}
 	return nil
 }
+
+// TODO
+func (c *Controller) runPodUpdater(ctx context.Context) error {
+	for event := range c.pods.Events(ctx) {
+		switch event.Kind {
+		case resource.Upsert:
+			c.logger.Debug("Got Upsert Pod event", logfields.K8sPodName, event.Key.String())
+			c.onPodUpdate(event.Object)
+		case resource.Delete:
+			c.logger.Debug("Got Delete Pod event", logfields.K8sPodName, event.Key.String())
+			c.onPodDelete(event.Object)
+		}
+		event.Done(nil)
+	}
+	return nil
+}
+
+// TODO
+// func (c *Controller) runCiliumIdentityUpdater(ctx context.Context) error {
+// 	for event := range c.ciliumIdentity.Events(ctx) {
+// 		switch event.Kind {
+// 		case resource.Upsert:
+// 			c.logger.Debug("Got Upsert Identity event", logfields.CIDName, event.Key.String())
+// 			c.onIdentityUpdate(event.Object)
+// 		case resource.Delete:
+// 			c.logger.Debug("Got Delete Identity event", logfields.CIDName, event.Key.String())
+// 			c.onIdentityDelete(event.Object)
+// 		}
+// 		event.Done(nil)
+// 	}
+// 	return nil
+// }
 
 // Sync all CESs from cesStore to manager cache.
 // Note: CESs are synced locally before CES controller running and this is required.
@@ -335,4 +395,66 @@ func (c *Controller) handleErr(queue workqueue.TypedRateLimitingInterface[CESKey
 		logfields.CESName, key.string(),
 		logfields.Error, err)
 	queue.Forget(key)
+}
+
+// ConvertCEPToCoreCEP converts a CiliumEndpoint to a CoreCiliumEndpoint
+// containing only a minimal set of entities used to
+func (c *Controller) ConvertPodToCoreCiliumEndpoint(pod *slim_corev1.Pod) *v2alpha1.CoreCiliumEndpoint {
+	// TODO: does this work with Host Networking pods?
+
+	podIPs := k8sUtils.ValidIPs(pod.Status)
+	if len(podIPs) == 0 {
+		return nil
+	}
+
+	var identityID identity.NumericIdentity = identity.IdentityUnknown
+	identityNotFound := true
+
+	var epNetworking *cilium_api_v2.EndpointNetworking
+	var addressPairs cilium_api_v2.AddressPairList
+
+	for _, podIP := range podIPs {
+		id, exists := c.ipcache.LookupByIP(podIP)
+		if exists {
+			identityID = id.ID
+			identityNotFound = false
+		}
+
+		ip, err := netip.ParseAddr(podIP)
+		if err != nil {
+			// TODO
+			continue
+		}
+		
+	}
+
+	if identityNotFound {
+		return nil // Let's find a more elegant way
+	}
+
+	return &v2alpha1.CoreCiliumEndpoint{
+		Name:       pod.GetName(),
+		IdentityID: int64(identityID),
+	}
+	/*
+		// Copy Networking field into core CEP
+		var epNetworking *cilium_v2.EndpointNetworking
+		if cep.Status.Networking != nil {
+			epNetworking = new(cilium_v2.EndpointNetworking)
+			cep.Status.Networking.DeepCopyInto(epNetworking)
+		}
+
+		// TODO: Get Identity of Pod
+		var identityID int64 = 0
+		if cep.Status.Identity != nil {
+			identityID = cep.Status.Identity.ID
+		}
+		return &cilium_v2alpha1.CoreCiliumEndpoint{
+			Name:       pod.GetName(),
+			Networking: epNetworking,
+			Encryption: cep.Status.Encryption,
+			IdentityID: identityID,
+			NamedPorts: cep.Status.NamedPorts.DeepCopy(),
+		}
+	*/
 }
