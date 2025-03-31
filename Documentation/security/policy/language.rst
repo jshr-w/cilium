@@ -347,7 +347,8 @@ cluster
     Cluster is the logical group of all network endpoints inside of the local
     cluster. This includes all Cilium-managed endpoints of the local cluster,
     unmanaged endpoints in the local cluster, as well as the host,
-    remote-node, and init identities.
+    remote-node, and init identities. This also includes all remote nodes
+    in a clustermesh scenario.
 init
     The init entity contains all endpoints in bootstrap phase for which the
     security identity has not been resolved yet. This is typically only
@@ -1069,6 +1070,11 @@ Host
 Headers
   Headers is a list of HTTP headers which must be present in the request. If
   omitted or empty, requests are allowed regardless of headers present.
+
+  It's also possible to do some more advanced header matching against header
+  values. ``HeaderMatches`` is a list of HTTP headers which must be present and
+  match against the given values. Mismatch field can be used to specify what
+  to do when there is no match.
 
 Allow GET /public
 ~~~~~~~~~~~~~~~~~

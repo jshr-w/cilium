@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -202,7 +202,7 @@ func (ds *DaemonSuite) prepareEndpoint(t *testing.T, identity *identity.Identity
 	if qa {
 		testEndpointID = testQAEndpointID
 	}
-	e := endpoint.NewTestEndpointWithState(ds.d, ds.d, testipcache.NewMockIPCache(), ds.d.l7Proxy, ds.d.identityAllocator, ds.d.ctMapGC, testEndpointID, endpoint.StateWaitingForIdentity)
+	e := endpoint.NewTestEndpointWithState(ds.d.dnsRulesAPI, ds.d.epBuildQueue, ds.d.loader, ds.d.orchestrator, ds.d.compilationLock, ds.d.bwManager, ds.d.iptablesManager, ds.d.idmgr, ds.d.policyMapFactory, ds.d.policy, testipcache.NewMockIPCache(), ds.d.l7Proxy, ds.d.identityAllocator, ds.d.ctMapGC, testEndpointID, endpoint.StateWaitingForIdentity)
 	e.SetPropertyValue(endpoint.PropertyFakeEndpoint, false)
 	e.SetPropertyValue(endpoint.PropertyWithouteBPFDatapath, true)
 	e.SetPropertyValue(endpoint.PropertySkipBPFPolicy, true)
@@ -350,9 +350,7 @@ func (ds *DaemonSuite) testUpdateConsumerMap(t *testing.T) {
 		// uint32(prodFooSecLblsCtx.ID),
 		// uint32(prodFooJoeSecLblsCtx.ID),
 	}
-	sort.Slice(expectedRemotePolicies, func(i, j int) bool {
-		return expectedRemotePolicies[i] < expectedRemotePolicies[j]
-	})
+	slices.Sort(expectedRemotePolicies)
 	expectedNetworkPolicy := &cilium.NetworkPolicy{
 		EndpointIps:      []string{QAIPv6Addr.String(), QAIPv4Addr.String()},
 		EndpointId:       uint64(eQABar.ID),
@@ -393,9 +391,7 @@ func (ds *DaemonSuite) testUpdateConsumerMap(t *testing.T) {
 		uint32(prodFooSecLblsCtx.ID),
 		uint32(prodFooJoeSecLblsCtx.ID),
 	}
-	sort.Slice(expectedRemotePolicies, func(i, j int) bool {
-		return expectedRemotePolicies[i] < expectedRemotePolicies[j]
-	})
+	slices.Sort(expectedRemotePolicies)
 
 	expectedNetworkPolicy = &cilium.NetworkPolicy{
 		EndpointIps:      []string{ProdIPv6Addr.String(), ProdIPv4Addr.String()},

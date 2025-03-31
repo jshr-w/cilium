@@ -8,7 +8,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/envoy"
@@ -23,6 +22,19 @@ func (p *ProxyPorts) released(pp *ProxyPort) bool {
 	return pp.nRedirects == 0 && pp.ProxyPort == 0 && !pp.configured && !pp.acknowledged
 }
 
+func (p *ProxyPorts) zeroProxyPort(pp *ProxyPort) bool {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	return pp.ProxyPort == 0
+}
+
+func (p *ProxyPorts) releaseProxyPortWithWait(name string, portReuseWait time.Duration) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	return p.releaseProxyPort(name, portReuseWait)
+}
+
 func TestPortAllocator(t *testing.T) {
 	testRunDir := t.TempDir()
 	socketDir := envoy.GetSocketDir(testRunDir)
@@ -33,7 +45,7 @@ func TestPortAllocator(t *testing.T) {
 			os.RemoveAll(socketDir)
 		}()
 	}
-	p, cleaner := proxyPortsForTest()
+	p, cleaner := proxyPortsForTest(t)
 	defer cleaner()
 
 	port, err := p.AllocateCRDProxyPort("listener1")
@@ -66,7 +78,7 @@ func TestPortAllocator(t *testing.T) {
 	require.False(t, pp.acknowledged)
 	require.Zero(t, pp.ProxyPort)
 
-	err = p.releaseProxyPort("listener1", 10*time.Millisecond)
+	err = p.releaseProxyPortWithWait("listener1", 10*time.Millisecond)
 	require.NoError(t, err)
 
 	// Proxy port is not released immediately
@@ -138,7 +150,7 @@ func TestPortAllocator(t *testing.T) {
 	require.Equal(t, port2, pp.ProxyPort)
 
 	// 2nd release decreases the count to zero
-	err = p.releaseProxyPort("listener1", time.Microsecond)
+	err = p.releaseProxyPortWithWait("listener1", time.Microsecond)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -184,7 +196,7 @@ func TestPortAllocator(t *testing.T) {
 	require.Equal(t, port3, pp.rulesPort)
 
 	// Release marks the port as unallocated
-	err = p.releaseProxyPort("listener1", time.Microsecond)
+	err = p.releaseProxyPortWithWait("listener1", time.Microsecond)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -225,7 +237,7 @@ func TestRestoredPort(t *testing.T) {
 			os.RemoveAll(socketDir)
 		}()
 	}
-	p, cleaner := proxyPortsForTest()
+	p, cleaner := proxyPortsForTest(t)
 	defer cleaner()
 
 	// simulate proxy port restored from file
@@ -274,13 +286,15 @@ func TestRestoredPort(t *testing.T) {
 
 	// Release
 	require.Nil(t, pp.releaseCancel)
-	err = p.releaseProxyPort(ppName, time.Microsecond)
+	err = p.releaseProxyPortWithWait(ppName, time.Microsecond)
 	require.NoError(t, err)
 	require.Zero(t, pp.nRedirects)
 
 	// wait for port reuse wait to pass
 	// waiting time is set up to 1s (instead of exactly 1ms) to avoid potential flake in CI
-	require.Eventually(t, func() bool { return assert.Zero(t, pp.ProxyPort) }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		return p.zeroProxyPort(pp)
+	}, time.Second, time.Millisecond)
 	require.False(t, pp.configured)
 	require.False(t, pp.acknowledged)
 

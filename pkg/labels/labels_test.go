@@ -56,7 +56,7 @@ func TestNewFrom(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			newLbls := NewFrom(tt.lbls)
 			// Verify that underlying maps are different
-			assert.NotSame(t, &tt.lbls, &newLbls)
+			assert.NotEqual(t, reflect.ValueOf(tt.lbls).UnsafePointer(), reflect.ValueOf(newLbls).UnsafePointer())
 			// Verify that the map contents are equal
 			assert.EqualValues(t, tt.want, newLbls)
 		})
@@ -107,6 +107,34 @@ func TestMergeLabels(t *testing.T) {
 	}
 	to.MergeLabels(from)
 	from["key1"] = NewLabel("key1", "changed", "source4")
+	require.EqualValues(t, want, to)
+}
+
+func TestRemove(t *testing.T) {
+	to := Labels{
+		"key1": NewLabel("key1", "value1", "source1"),
+		"key2": NewLabel("key2", "value3", "source4"),
+	}
+	remove := Labels{
+		"key1": NewLabel("key1", "value3", "source4"),
+	}
+	want := Labels{
+		"key2": NewLabel("key2", "value3", "source4"),
+	}
+	to.Remove(remove)
+	require.EqualValues(t, want, to)
+}
+
+func TestRemoveFromSource(t *testing.T) {
+	to := Labels{
+		"key1": NewLabel("key1", "value1", "source1"),
+		"key2": NewLabel("key2", "value3", "source4"),
+		"key3": NewLabel("key2", "value5", "source1"),
+	}
+	want := Labels{
+		"key2": NewLabel("key2", "value3", "source4"),
+	}
+	to.RemoveFromSource("source1")
 	require.EqualValues(t, want, to)
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	ciliumdns "github.com/cilium/dns"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/defaults"
@@ -21,6 +22,7 @@ import (
 	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/fqdn/dns"
 	"github.com/cilium/cilium/pkg/fqdn/dnsproxy"
+	"github.com/cilium/cilium/pkg/fqdn/namemanager"
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -30,7 +32,6 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
-	"github.com/cilium/cilium/pkg/proxy/logger"
 	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
@@ -50,7 +51,6 @@ func setupDaemonFQDNSuite(tb testing.TB) *DaemonFQDNSuite {
 	// Also, node.SetTestLocalNodeStore() panics if it called more than once.
 	notifyOnDNSMsgBenchSetup.Do(func() {
 		// set FQDN related options to defaults in order to avoid a flood of warnings
-		option.Config.DNSProxyLockCount = defaults.DNSProxyLockCount
 		option.Config.DNSProxyLockTimeout = defaults.DNSProxyLockTimeout
 		option.Config.FQDNProxyResponseMaxDelay = defaults.FQDNProxyResponseMaxDelay
 
@@ -58,13 +58,12 @@ func setupDaemonFQDNSuite(tb testing.TB) *DaemonFQDNSuite {
 		node.SetTestLocalNodeStore()
 
 		re.InitRegexCompileLRU(defaults.FQDNRegexCompileLRUSize)
-		logger.SetEndpointInfoRegistry(&dummyInfoRegistry{})
 	})
 
 	ds := &DaemonFQDNSuite{}
 	d := &Daemon{}
 	d.ctx = context.Background()
-	d.policy = policy.NewPolicyRepository(nil, nil, nil, nil, api.NewPolicyMetricsNoop())
+	d.policy = policy.NewPolicyRepository(hivetest.Logger(tb), nil, nil, nil, nil, api.NewPolicyMetricsNoop())
 	d.endpointManager = endpointmanager.New(&dummyEpSyncher{}, nil, nil)
 	d.ipcache = ipcache.NewIPCache(&ipcache.Configuration{
 		Context:           context.TODO(),
@@ -72,17 +71,26 @@ func setupDaemonFQDNSuite(tb testing.TB) *DaemonFQDNSuite {
 		PolicyHandler:     d.policy.GetSelectorCache(),
 		DatapathHandler:   d.endpointManager,
 	})
-	d.dnsNameManager = fqdn.NewNameManager(fqdn.Config{
-		MinTTL:  1,
-		Cache:   fqdn.NewDNSCache(0),
+	d.dnsNameManager = namemanager.New(namemanager.ManagerParams{
+		Config: namemanager.NameManagerConfig{
+			MinTTL:            1,
+			DNSProxyLockCount: defaults.DNSProxyLockCount,
+			StateDir:          defaults.StateDir,
+		},
 		IPCache: d.ipcache,
 	})
+	d.dnsNameManager.CompleteBootstrap()
 	d.policy.GetSelectorCache().SetLocalIdentityNotifier(d.dnsNameManager)
+	d.proxyAccessLogger = accesslog.NewProxyAccessLogger(hivetest.Logger(tb), accesslog.ProxyAccessLoggerConfig{}, &noopNotifier{}, &dummyInfoRegistry{})
 
 	ds.d = d
 
 	return ds
 }
+
+type noopNotifier struct{}
+
+func (*noopNotifier) NewProxyLogRecord(l *accesslog.LogRecord) error { return nil }
 
 type dummyInfoRegistry struct{}
 
@@ -92,6 +100,41 @@ func (*dummyInfoRegistry) FillEndpointInfo(ctx context.Context, info *accesslog.
 // BenchmarkNotifyOnDNSMsg stresses the main callback function for the DNS
 // proxy path, which is called on every DNS request and response.
 func BenchmarkNotifyOnDNSMsg(b *testing.B) {
+	var (
+		ciliumMsg = &ciliumdns.Msg{
+			MsgHdr: ciliumdns.MsgHdr{
+				Response: true,
+			},
+			Question: []ciliumdns.Question{{
+				Name: dns.FQDN("cilium.io"),
+			}},
+			Answer: []ciliumdns.RR{&ciliumdns.A{
+				Hdr: ciliumdns.RR_Header{
+					Name: dns.FQDN("cilium.io"),
+					Ttl:  3600,
+				},
+				A: net.ParseIP("192.0.2.3"),
+			}},
+		}
+		ebpfMsg = &ciliumdns.Msg{
+			MsgHdr: ciliumdns.MsgHdr{
+				Response: true,
+			},
+			Compress: false,
+			Question: []ciliumdns.Question{{
+				Name: dns.FQDN("ebpf.io"),
+			}},
+			Answer: []ciliumdns.RR{&ciliumdns.A{
+				Hdr: ciliumdns.RR_Header{
+					Name: dns.FQDN("ebpf.io"),
+					Ttl:  3600,
+				},
+				A: net.ParseIP("192.0.2.4"),
+			}},
+		}
+		srvAddr    = netip.MustParseAddrPort("10.96.64.1:53")
+		emptyPRCtx = &dnsproxy.ProxyRequestContext{}
+	)
 	ds := setupDaemonFQDNSuite(b)
 
 	var (
@@ -129,6 +172,7 @@ func BenchmarkNotifyOnDNSMsg(b *testing.B) {
 		ep.DNSHistory = fqdn.NewDNSCache(0)
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	// Simulate parallel DNS responses from the upstream DNS for cilium.io and
 	// ebpf.io, done by every endpoint.
@@ -141,30 +185,8 @@ func BenchmarkNotifyOnDNSMsg(b *testing.B) {
 				// parameter is only used in logging. Not using the endpoint's IP
 				// so we don't spend any time in the benchmark on converting from
 				// net.IP to string.
-				require.NoError(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.8:12345", 0, "10.96.64.1:53", &ciliumdns.Msg{
-					MsgHdr: ciliumdns.MsgHdr{
-						Response: true,
-					},
-					Question: []ciliumdns.Question{{
-						Name: dns.FQDN("cilium.io"),
-					}},
-					Answer: []ciliumdns.RR{&ciliumdns.A{
-						Hdr: ciliumdns.RR_Header{Name: dns.FQDN("cilium.io")},
-						A:   net.ParseIP("192.0.2.3"),
-					}}}, "udp", true, &dnsproxy.ProxyRequestContext{}))
-
-				require.NoError(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.4:54321", 0, "10.96.64.1:53", &ciliumdns.Msg{
-					MsgHdr: ciliumdns.MsgHdr{
-						Response: true,
-					},
-					Compress: false,
-					Question: []ciliumdns.Question{{
-						Name: dns.FQDN("ebpf.io"),
-					}},
-					Answer: []ciliumdns.RR{&ciliumdns.A{
-						Hdr: ciliumdns.RR_Header{Name: dns.FQDN("ebpf.io")},
-						A:   net.ParseIP("192.0.2.4"),
-					}}}, "udp", true, &dnsproxy.ProxyRequestContext{}))
+				require.NoError(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.8:12345", 0, srvAddr, ciliumMsg, "udp", true, emptyPRCtx))
+				require.NoError(b, ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.4:54321", 0, srvAddr, ebpfMsg, "udp", true, emptyPRCtx))
 			}()
 		}
 		wg.Wait()

@@ -460,7 +460,7 @@ func (s *Server) newServer(spec *healthApi.Spec) *healthApi.Server {
 	restAPI.ConnectivityGetStatusHandler = NewGetStatusHandler(s)
 	restAPI.ConnectivityPutStatusProbeHandler = NewPutStatusProbeHandler(s)
 
-	api.DisableAPIs(spec.DeniedAPIs, restAPI.AddMiddlewareFor)
+	api.DisableAPIs(logging.DefaultSlogLogger, spec.DeniedAPIs, restAPI.AddMiddlewareFor)
 	srv := healthApi.NewServer(restAPI)
 	srv.EnabledListeners = []string{"unix"}
 	srv.SocketPath = defaults.SockPath
@@ -496,11 +496,6 @@ func NewServer(config Config) (*Server, error) {
 // If it fails to get either of internal node address, it returns "0.0.0.0" if ipv4 or "::" if ipv6.
 func getAddresses() []string {
 	addresses := make([]string, 0, 2)
-
-	// listen on all interfaces and all families in case of external-workloads
-	if option.Config.JoinCluster {
-		return []string{""}
-	}
 
 	if option.Config.EnableIPv4 {
 		if ipv4 := node.GetInternalIPv4(); ipv4 != nil {

@@ -18,7 +18,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -182,10 +181,6 @@ func (d *Daemon) initMaps() error {
 		log.WithError(err).Fatal("Unable to initialize service maps")
 	}
 
-	if err := policymap.InitCallMaps(); err != nil {
-		return fmt.Errorf("initializing policy map: %w", err)
-	}
-
 	for _, ep := range d.endpointManager.GetEndpoints() {
 		ep.InitMap()
 	}
@@ -292,14 +287,18 @@ func (d *Daemon) initMaps() error {
 		}
 	}
 
-	if option.Config.NodePortAlg == option.NodePortAlgMaglev ||
-		option.Config.LoadBalancerAlgorithmAnnotation {
+	if !d.explbConfig.EnableExperimentalLB &&
+		(option.Config.NodePortAlg == option.NodePortAlgMaglev ||
+			option.Config.LoadBalancerAlgorithmAnnotation) {
 		if err := lbmap.InitMaglevMaps(option.Config.EnableIPv4, option.Config.EnableIPv6, uint32(d.maglevConfig.MaglevTableSize)); err != nil {
 			return fmt.Errorf("initializing maglev maps: %w", err)
 		}
 	}
 
-	_, err := lbmap.NewSkipLBMap()
+	skiplbmap, err := lbmap.NewSkipLBMap()
+	if err == nil {
+		err = skiplbmap.OpenOrCreate()
+	}
 	if err != nil {
 		return fmt.Errorf("initializing local redirect policy maps: %w", err)
 	}
@@ -420,23 +419,4 @@ func setupRouteToVtepCidr() error {
 	}
 
 	return nil
-}
-
-// Loader returns a reference to the loader implementation.
-func (d *Daemon) Loader() datapath.Loader {
-	return d.loader
-}
-
-// Orchestrator returns a reference to the orchestrator implementation.
-func (d *Daemon) Orchestrator() datapath.Orchestrator {
-	return d.orchestrator
-}
-
-// BandwidthManager returns a reference to the bandwidth manager implementation.
-func (d *Daemon) BandwidthManager() datapath.BandwidthManager {
-	return d.bwManager
-}
-
-func (d *Daemon) IPTablesManager() datapath.IptablesManager {
-	return d.iptablesManager
 }

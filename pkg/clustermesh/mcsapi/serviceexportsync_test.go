@@ -149,9 +149,8 @@ func Test_mcsServiceExportSync_Reconcile(t *testing.T) {
 	kvstore.SetupDummy(t, "etcd")
 
 	clusterName := "cluster1"
-	storeFactory := store.NewFactory(store.MetricsProvider())
-	kvs := storeFactory.NewSyncStore(
-		clusterName, kvstore.Client(), types.ServiceExportStorePrefix)
+	storeFactory := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
+	kvs := storeFactory.NewSyncStore(clusterName, kvstore.Client(), types.ServiceExportStorePrefix)
 	require.NoError(t, kvs.UpsertKey(ctx, &types.MCSAPIServiceSpec{
 		Cluster:                 clusterName,
 		Name:                    "remove-service",
@@ -165,6 +164,7 @@ func Test_mcsServiceExportSync_Reconcile(t *testing.T) {
 		ExportCreationTimestamp: exportTime,
 	}))
 	go StartSynchronizingServiceExports(ctx, ServiceExportSyncParameters{
+		Logger:                  hivetest.Logger(t),
 		ClusterName:             "cluster1",
 		ClusterMeshEnableMCSAPI: true,
 		Clientset:               clientset,

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	ec2mock "github.com/cilium/cilium/pkg/aws/ec2/mock"
@@ -46,7 +47,7 @@ func TestStartENIGarbageCollector(t *testing.T) {
 		"cilium-managed": "true",
 	}
 
-	ec2api := ec2mock.NewAPI(subnets, vpcs, securityGroups)
+	ec2api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
 	require.NotNil(t, ec2api)
 
 	untaggedENIs := map[string]bool{}
@@ -69,7 +70,7 @@ func TestStartENIGarbageCollector(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	StartENIGarbageCollector(ctx, ec2api, GarbageCollectionParams{
+	StartENIGarbageCollector(ctx, hivetest.Logger(t), ec2api, GarbageCollectionParams{
 		RunInterval:    0, // for testing, we're triggering the controller manually
 		MaxPerInterval: 4,
 		ENITags:        tags,

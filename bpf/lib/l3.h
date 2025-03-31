@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common.h"
+#include "maps.h"
 #include "ipv6.h"
 #include "ipv4.h"
 #include "eps.h"
@@ -12,6 +13,7 @@
 #include "l4.h"
 #include "icmp6.h"
 #include "csum.h"
+#include "token_bucket.h"
 
 #ifdef ENABLE_IPV6
 static __always_inline int ipv6_l3(struct __ctx_buff *ctx, int l3_off,
@@ -57,6 +59,18 @@ static __always_inline int ipv4_l3(struct __ctx_buff *ctx, int l3_off,
 	return CTX_ACT_OK;
 }
 
+static __always_inline void
+local_delivery_fill_meta(struct __ctx_buff *ctx, __u32 seclabel,
+			 bool delivery_redirect, bool from_host,
+			 bool from_tunnel, __u32 cluster_id)
+{
+	ctx_store_meta(ctx, CB_SRC_LABEL, seclabel);
+	ctx_store_meta(ctx, CB_DELIVERY_REDIRECT, delivery_redirect ? 1 : 0);
+	ctx_store_meta(ctx, CB_FROM_HOST, from_host ? 1 : 0);
+	ctx_store_meta(ctx, CB_FROM_TUNNEL, from_tunnel ? 1 : 0);
+	ctx_store_meta(ctx, CB_CLUSTER_ID_INGRESS, cluster_id);
+}
+
 #ifndef SKIP_POLICY_MAP
 static __always_inline int
 l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
@@ -74,6 +88,17 @@ l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
 	 */
 	update_metrics(ctx_full_len(ctx), direction, REASON_FORWARDED);
 #endif
+
+	if (direction == METRIC_INGRESS && !from_host) {
+		/*
+		 * Traffic from nodes, local endpoints, or hairpin connections is ignored
+		 */
+		int ret;
+
+		ret = accept(ctx, ep->lxc_id);
+		if (IS_ERR(ret))
+			return ret;
+	}
 
 /*
  * When BPF host routing is enabled we need to check policies at source, as in
@@ -102,12 +127,7 @@ l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
 #else
 
 	/* Jumps to destination pod's BPF program to enforce ingress policies. */
-	ctx_store_meta(ctx, CB_SRC_LABEL, seclabel);
-	ctx_store_meta(ctx, CB_DELIVERY_REDIRECT, 1);
-	ctx_store_meta(ctx, CB_FROM_HOST, from_host ? 1 : 0);
-	ctx_store_meta(ctx, CB_FROM_TUNNEL, from_tunnel ? 1 : 0);
-	ctx_store_meta(ctx, CB_CLUSTER_ID_INGRESS, cluster_id);
-
+	local_delivery_fill_meta(ctx, seclabel, true, from_host, from_tunnel, cluster_id);
 	return tail_call_policy(ctx, ep->lxc_id);
 #endif
 }

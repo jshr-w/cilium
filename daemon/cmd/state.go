@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -46,7 +47,7 @@ func (d *Daemon) WaitForEndpointRestore(ctx context.Context) error {
 	return nil
 }
 
-func (d *Daemon) WaitForInitialEnvoyPolicy(ctx context.Context) error {
+func (d *Daemon) WaitForInitialPolicy(ctx context.Context) error {
 	if !option.Config.RestoreState {
 		return nil
 	}
@@ -54,6 +55,7 @@ func (d *Daemon) WaitForInitialEnvoyPolicy(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-d.endpointRestoreComplete:
 	case <-d.endpointInitialPolicyComplete:
 	}
 	return nil
@@ -179,7 +181,7 @@ func (d *Daemon) fetchOldEndpoints(dir string) (*endpointRestoreState, error) {
 	}
 	eptsID := endpoint.FilterEPDir(dirFiles)
 
-	state.possible = endpoint.ReadEPsFromDirNames(d.ctx, d, d, d.ipcache, dir, eptsID)
+	state.possible = endpoint.ReadEPsFromDirNames(d.ctx, d.dnsRulesAPI, d.epBuildQueue, d.loader, d.orchestrator, d.compilationLock, d.bwManager, d.iptablesManager, d.idmgr, d.monitorAgent, d.policyMapFactory, d.policy, d.ipcache, dir, eptsID)
 
 	if len(state.possible) == 0 {
 		log.Info("No old endpoints found.")
@@ -317,7 +319,7 @@ func (d *Daemon) regenerateRestoredEndpoints(state *endpointRestoreState, endpoi
 		if err := d.endpointManager.RestoreEndpoint(ep); err != nil {
 			log.WithError(err).Warning("Unable to restore endpoint")
 			// remove endpoint from slice of endpoints to restore
-			state.restored = append(state.restored[:i], state.restored[i+1:]...)
+			state.restored = slices.Delete(state.restored, i, i+1)
 		}
 	}
 

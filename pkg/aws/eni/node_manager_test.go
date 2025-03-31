@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -49,6 +50,24 @@ var (
 			Tags:  ipamTypes.Tags{"test-sg-2": "yes"},
 		},
 	}
+	testRouteTables = []*ipamTypes.RouteTable{
+		{
+			ID:               "rt-1",
+			VirtualNetworkID: "vpc-1",
+			Subnets: map[string]struct{}{
+				"subnet-1": {},
+				"subnet-2": {},
+			},
+		},
+		{
+			ID:               "rt-2",
+			VirtualNetworkID: "vpc-1",
+			Subnets: map[string]struct{}{
+				"subnet-3": {},
+				"subnet-4": {},
+			},
+		},
+	}
 	k8sapi     = &k8sMock{}
 	metricsapi = metricsmock.NewMockMetrics()
 )
@@ -64,10 +83,11 @@ func setup(tb testing.TB) {
 func TestGetNodeNames(t *testing.T) {
 	setup(t)
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -93,10 +113,11 @@ func TestGetNodeNames(t *testing.T) {
 func TestNodeManagerGet(t *testing.T) {
 	setup(t)
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -123,15 +144,17 @@ func TestNodeManagerDefaultAllocation(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerDefaultAllocation-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -139,7 +162,6 @@ func TestNodeManagerDefaultAllocation(t *testing.T) {
 	cn := newCiliumNode("node1", withTestDefaults(), withInstanceID(instanceID), withInstanceType("m5.large"), withIPAMPreAllocate(8))
 	mngr.Upsert(cn)
 	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
-
 	node := mngr.Get("node1")
 	require.NotNil(t, node)
 	require.Equal(t, 8, node.Stats().IPv4.AvailableIPs)
@@ -168,20 +190,22 @@ func TestNodeManagerPrefixDelegation(t *testing.T) {
 	const instanceID = "i-testNodeManagerDefaultAllocation-0"
 
 	pdTestSubnet := *testSubnet
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{&pdTestSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{&pdTestSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, true)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, true)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, true)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
 	// Announce node wait for IPs to become available
-	cn := newCiliumNode("node1", withInstanceID(instanceID), withInstanceType("m5a.large"), withIPAMPreAllocate(8))
+	cn := newCiliumNode("node1", withInstanceID(instanceID), withInstanceType("m5.large"), withIPAMPreAllocate(8))
 	mngr.Upsert(cn)
 	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
 
@@ -237,15 +261,17 @@ func TestNodeManagerENIWithSGTags(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerDefaultAllocation-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -297,15 +323,17 @@ func TestNodeManagerMinAllocate20(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerMinAllocate20-1"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -353,15 +381,17 @@ func TestNodeManagerMinAllocateAndPreallocate(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerMinAllocateAndPreallocate-1"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -406,7 +436,7 @@ func TestNodeManagerMinAllocateAndPreallocate(t *testing.T) {
 // TestNodeManagerReleaseAddress tests PreAllocate, MinAllocate and MaxAboveWatermark
 // when release excess IP is enabled
 //
-// - m4.large (4x ENIs, 3x15-3 IPs)
+// - m4.xlarge (4x ENIs, 3x15-3 IPs)
 // - MinAllocate 10
 // - MaxAllocate 0
 // - PreAllocate 2
@@ -418,15 +448,17 @@ func TestNodeManagerReleaseAddress(t *testing.T) {
 	const instanceID = "i-testNodeManagerReleaseAddress-1"
 
 	operatorOption.Config.ExcessIPReleaseDelay = 2
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, true, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, true, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -520,9 +552,11 @@ func TestNodeManagerENIExcludeInterfaceTags(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerDefaultAllocation-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	err = ec2api.TagENI(context.TODO(), eniID1, map[string]string{
@@ -533,7 +567,7 @@ func TestNodeManagerENIExcludeInterfaceTags(t *testing.T) {
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -588,15 +622,17 @@ func TestNodeManagerExceedENICapacity(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerExceedENICapacity-1"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -646,15 +682,17 @@ func TestInterfaceCreatedInInitialSubnet(t *testing.T) {
 		Tags:               ipamTypes.Tags{"k": "v"},
 	}
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet, testSubnet2}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet, testSubnet2}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, testSubnet.ID, "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -710,9 +748,11 @@ func TestNodeManagerManyNodes(t *testing.T) {
 		{ID: "s-3", AvailabilityZone: "us-west-1", VirtualNetworkID: "vpc-1", AvailableAddresses: 400},
 	}
 
-	ec2api := ec2mock.NewAPI(subnets, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instancesManager := NewInstancesManager(ec2api)
-	mngr, err := ipam.NewNodeManager(instancesManager, k8sapi, metricsapi, 10, false, false)
+	ec2api := ec2mock.NewAPI(subnets, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instancesManager, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
+	require.NotNil(t, instancesManager)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instancesManager, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -778,16 +818,18 @@ func TestNodeManagerInstanceNotRunning(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerInstanceNotRunning-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
 	metricsMock := metricsmock.NewMockMetrics()
-	instances := NewInstancesManager(ec2api)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	ec2api.SetMockError(ec2mock.AttachNetworkInterface, errors.New("foo is not 'running' foo"))
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
@@ -824,9 +866,11 @@ func TestInstanceBeenDeleted(t *testing.T) {
 
 	const instanceID = "i-testInstanceBeenDeleted-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
@@ -836,7 +880,7 @@ func TestInstanceBeenDeleted(t *testing.T) {
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 1, instanceID, eniID2)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -883,15 +927,17 @@ func TestNodeManagerStaticIP(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerStaticIP-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -927,9 +973,11 @@ func TestNodeManagerStaticIPAlreadyAssociated(t *testing.T) {
 
 	const instanceID = "i-testNodeManagerStaticIPAlreadyAssociated-0"
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
-	instances := NewInstancesManager(ec2api)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, testRouteTables)
+	instances, err := NewInstancesManager(hivetest.Logger(t), ec2api)
+	require.NoError(t, err)
 	require.NotNil(t, instances)
+
 	eniID1, _, err := ec2api.CreateNetworkInterface(context.TODO(), 0, "s-1", "desc", []string{"sg1", "sg2"}, false)
 	require.NoError(t, err)
 	_, err = ec2api.AttachNetworkInterface(context.TODO(), 0, instanceID, eniID1)
@@ -937,7 +985,7 @@ func TestNodeManagerStaticIPAlreadyAssociated(t *testing.T) {
 	staticIP, err := ec2api.AssociateEIP(context.TODO(), instanceID, make(ipamTypes.Tags))
 	require.NoError(t, err)
 	instances.Resync(context.TODO())
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
@@ -958,12 +1006,13 @@ func benchmarkAllocWorker(b *testing.B, workers int64, delay time.Duration, rate
 	testSubnet2 := &ipamTypes.Subnet{ID: "s-2", AvailabilityZone: "us-west-1", VirtualNetworkID: "vpc-1", AvailableAddresses: 1000000}
 	testSubnet3 := &ipamTypes.Subnet{ID: "s-3", AvailabilityZone: "us-west-1", VirtualNetworkID: "vpc-1", AvailableAddresses: 1000000}
 
-	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet1, testSubnet2, testSubnet3}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups)
+	ec2api := ec2mock.NewAPI([]*ipamTypes.Subnet{testSubnet1, testSubnet2, testSubnet3}, []*ipamTypes.VirtualNetwork{testVpc}, testSecurityGroups, routeTables)
 	ec2api.SetDelay(ec2mock.AllOperations, delay)
 	ec2api.SetLimiter(rateLimit, burst)
-	instances := NewInstancesManager(ec2api)
+	instances, err := NewInstancesManager(hivetest.Logger(b), ec2api)
+	require.NoError(b, err)
 	require.NotNil(b, instances)
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsapi, 10, false, false)
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(b), instances, k8sapi, metricsapi, 10, false, false)
 	require.NoError(b, err)
 	require.NotNil(b, mngr)
 

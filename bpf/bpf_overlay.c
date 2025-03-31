@@ -4,7 +4,8 @@
 #include <bpf/ctx/skb.h>
 #include <bpf/api.h>
 
-#include <node_config.h>
+#include <bpf/config/node.h>
+#include <bpf/config/global.h>
 #include <netdev_config.h>
 #include "lib/mcast.h"
 
@@ -42,6 +43,7 @@
 #include "lib/egress_gateway.h"
 
 #ifdef ENABLE_VTEP
+#include "lib/vtep.h"
 #include "lib/arp.h"
 #include "lib/encap.h"
 #include "lib/eps.h"
@@ -149,6 +151,37 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 not_esp:
 #endif
 
+#if defined(ENABLE_EGRESS_GATEWAY_COMMON)
+	{
+		__u32 egress_ifindex = 0;
+		union v6addr snat_addr, daddr;
+
+		ipv6_addr_copy(&daddr, (union v6addr *)&ip6->daddr);
+		if (egress_gw_snat_needed_hook_v6((union v6addr *)&ip6->saddr,
+						  &daddr, &snat_addr,
+						  &egress_ifindex)) {
+			if (ipv6_addr_equals(&snat_addr, &EGRESS_GATEWAY_NO_EGRESS_IP_V6))
+				return DROP_NO_EGRESS_IP;
+
+			ret = ipv6_l3(ctx, ETH_HLEN, NULL, NULL, METRIC_INGRESS);
+			if (unlikely(ret != CTX_ACT_OK))
+				return ret;
+
+			set_identity_mark(ctx, *identity, MARK_MAGIC_EGW_DONE);
+
+			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
+			ret = egress_gw_fib_lookup_and_redirect_v6(ctx, &snat_addr,
+								   &daddr, egress_ifindex,
+								   ext_err);
+			if (ret != CTX_ACT_OK)
+				return ret;
+
+			if (!revalidate_data(ctx, &data, &data_end, &ip6))
+				return DROP_INVALID;
+		}
+	}
+#endif /* ENABLE_EGRESS_GATEWAY_COMMON */
+
 	/* Deliver to local (non-host) endpoint: */
 	ep = lookup_ip6_endpoint(ip6);
 	if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
@@ -183,7 +216,7 @@ int tail_handle_ipv6(struct __ctx_buff *ctx)
 
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
-						  CTX_ACT_DROP, METRIC_INGRESS);
+						  METRIC_INGRESS);
 	return ret;
 }
 #endif /* ENABLE_IPV6 */
@@ -272,7 +305,7 @@ int tail_handle_inter_cluster_revsnat(struct __ctx_buff *ctx)
 	ret = handle_inter_cluster_revsnat(ctx, src_sec_identity, &ext_err);
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
-						  CTX_ACT_DROP, METRIC_INGRESS);
+						  METRIC_INGRESS);
 	return ret;
 }
 #endif
@@ -287,6 +320,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	struct endpoint_info *ep;
 	bool decrypted;
 	bool __maybe_unused is_dsr = false;
+	fraginfo_t fraginfo __maybe_unused;
 	int ret;
 
 	/* verifier workaround (dereference of modified ctx ptr) */
@@ -298,7 +332,8 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
  * then drop the packet.
  */
 #ifndef ENABLE_IPV4_FRAGMENTS
-	if (ipv4_is_fragment(ip4))
+	fraginfo = ipfrag_encode_ipv4(ip4);
+	if (ipfrag_is_fragment(fraginfo))
 		return DROP_FRAG_NOSUPPORT;
 #endif
 
@@ -353,7 +388,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 			struct vtep_value *vtep;
 
 			vkey.vtep_ip = ip4->saddr & VTEP_MASK;
-			vtep = map_lookup_elem(&VTEP_MAP, &vkey);
+			vtep = map_lookup_elem(&cilium_vtep_map, &vkey);
 			if (!vtep)
 				goto skip_vtep;
 			if (vtep->tunnel_endpoint) {
@@ -442,7 +477,7 @@ not_esp:
 			if (unlikely(ret != CTX_ACT_OK))
 				return ret;
 
-			ctx_egw_done_set(ctx);
+			set_identity_mark(ctx, *identity, MARK_MAGIC_EGW_DONE);
 
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
 			ret = egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
@@ -486,7 +521,7 @@ int tail_handle_ipv4(struct __ctx_buff *ctx)
 	ret = handle_ipv4(ctx, &src_sec_identity, &ext_err);
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
-						  CTX_ACT_DROP, METRIC_INGRESS);
+						  METRIC_INGRESS);
 	return ret;
 }
 
@@ -514,19 +549,18 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 
 	key_size = TUNNEL_KEY_WITHOUT_SRC_IP;
 	if (unlikely(ctx_get_tunnel_key(ctx, &key, key_size, 0) < 0))
-		return send_drop_notify_error(ctx, UNKNOWN_ID, DROP_NO_TUNNEL_KEY, CTX_ACT_DROP,
-										METRIC_INGRESS);
+		return send_drop_notify_error(ctx, UNKNOWN_ID, DROP_NO_TUNNEL_KEY, METRIC_INGRESS);
 
 	if (!arp_validate(ctx, &mac, &smac, &sip, &tip) || !__lookup_ip4_endpoint(tip))
 		goto pass_to_stack;
 	vkey.vtep_ip = sip & VTEP_MASK;
-	info = map_lookup_elem(&VTEP_MAP, &vkey);
+	info = map_lookup_elem(&cilium_vtep_map, &vkey);
 	if (!info)
 		goto pass_to_stack;
 
 	ret = arp_prepare_response(ctx, &mac, tip, &smac, sip);
 	if (unlikely(ret != 0))
-		return send_drop_notify_error(ctx, UNKNOWN_ID, ret, CTX_ACT_DROP, METRIC_EGRESS);
+		return send_drop_notify_error(ctx, UNKNOWN_ID, ret, METRIC_EGRESS);
 	if (info->tunnel_endpoint) {
 		ret = __encap_and_redirect_with_nodeid(ctx, info->tunnel_endpoint,
 						       LOCAL_NODE_ID, WORLD_IPV4_ID,
@@ -539,7 +573,7 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 
 	ret = DROP_UNKNOWN_L3;
 drop_err:
-	return send_drop_notify_error(ctx, UNKNOWN_ID, ret, CTX_ACT_DROP, METRIC_EGRESS);
+	return send_drop_notify_error(ctx, UNKNOWN_ID, ret, METRIC_EGRESS);
 
 pass_to_stack:
 	send_trace_notify(ctx, TRACE_TO_STACK, UNKNOWN_ID, UNKNOWN_ID,
@@ -713,8 +747,7 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 out:
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret,
-						  ext_err, CTX_ACT_DROP,
-						  METRIC_INGRESS);
+						  ext_err, METRIC_INGRESS);
 	return ret;
 }
 
@@ -733,6 +766,8 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	__be16 __maybe_unused proto = 0;
 	__s8 ext_err = 0;
 
+	bpf_clear_meta(ctx);
+
 	/* Load the ethertype just once: */
 	validate_ethertype(ctx, &proto);
 
@@ -745,9 +780,8 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	 */
 	ret = edt_sched_departure(ctx, proto);
 	/* No send_drop_notify_error() here given we're rate-limiting. */
-	if (ret == CTX_ACT_DROP) {
-		update_metrics(ctx_full_len(ctx), METRIC_EGRESS,
-			       -DROP_EDT_HORIZON);
+	if (ret < 0) {
+		update_metrics(ctx_full_len(ctx), METRIC_EGRESS, (__u8)-ret);
 		return CTX_ACT_DROP;
 	}
 #endif
@@ -775,12 +809,12 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 		goto out;
 	}
 
-	ret = handle_nat_fwd(ctx, cluster_id, proto, false, &trace, &ext_err);
+	ret = handle_nat_fwd(ctx, cluster_id, src_sec_identity, proto, false, &trace, &ext_err);
 out:
 #endif
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
-						  CTX_ACT_DROP, METRIC_EGRESS);
+						  METRIC_EGRESS);
 	return ret;
 }
 

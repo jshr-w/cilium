@@ -64,7 +64,7 @@ func (ev *EndpointRegenerationEvent) Handle(res chan interface{}) {
 	// We should only queue the request after we use all the endpoint's
 	// lock/unlock. Otherwise this can get a deadlock if the endpoint is
 	// being deleted at the same time. More info PR-1777.
-	doneFunc, err := e.owner.QueueEndpointBuild(regenContext.parentContext, uint64(e.ID))
+	doneFunc, err := e.epBuildQueue.QueueEndpointBuild(regenContext.parentContext, uint64(e.ID))
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			e.getLogger().WithError(err).Warning("unable to queue endpoint build")
@@ -171,20 +171,20 @@ func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
 
 	if port != e.noTrackPort {
 		log.Debug("Updating NOTRACK rules")
-		if e.IPv4.IsValid() {
+		if option.Config.EnableIPv4 && e.IPv4.IsValid() {
 			if port > 0 {
-				e.owner.IPTablesManager().InstallNoTrackRules(e.IPv4, port)
+				e.ipTablesManager.InstallNoTrackRules(e.IPv4, port)
 			}
 			if e.noTrackPort > 0 {
-				e.owner.IPTablesManager().RemoveNoTrackRules(e.IPv4, e.noTrackPort)
+				e.ipTablesManager.RemoveNoTrackRules(e.IPv4, e.noTrackPort)
 			}
 		}
-		if e.IPv6.IsValid() {
+		if option.Config.EnableIPv6 && e.IPv6.IsValid() {
 			if port > 0 {
-				e.owner.IPTablesManager().InstallNoTrackRules(e.IPv6, port)
+				e.ipTablesManager.InstallNoTrackRules(e.IPv6, port)
 			}
 			if e.noTrackPort > 0 {
-				e.owner.IPTablesManager().RemoveNoTrackRules(e.IPv6, e.noTrackPort)
+				e.ipTablesManager.RemoveNoTrackRules(e.IPv6, e.noTrackPort)
 			}
 		}
 		e.noTrackPort = port
@@ -198,15 +198,16 @@ func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
 // EndpointPolicyBandwidthEvent contains all fields necessary to update
 // the Pod's bandwidth policy.
 type EndpointPolicyBandwidthEvent struct {
-	bwm             datapath.BandwidthManager
-	ep              *Endpoint
-	bandwidthEgress string
-	priority        string
+	bwm              datapath.BandwidthManager
+	ep               *Endpoint
+	bandwidthEgress  string
+	bandwidthIngress string
+	priority         string
 }
 
 // Handle handles the policy bandwidth update.
 func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
-	var bps, prio uint64
+	var bps, ingressBps, prio uint64
 
 	if !ev.bwm.Enabled() {
 		res <- &EndpointRegenerationResult{
@@ -286,6 +287,33 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 	e.getLogger().Debugf("Updating %s from %s to %s bytes/sec", bandwidth.EgressBandwidth,
 		bpsOld, bpsNew)
 	e.bps = bps
+
+	if ev.bandwidthIngress != "" {
+		ingressBps, err = bandwidth.GetBytesPerSec(ev.bandwidthIngress)
+		if err != nil {
+			res <- &EndpointRegenerationResult{
+				err: err,
+			}
+			return
+		}
+		ev.bwm.UpdateIngressBandwidthLimit(e.ID, ingressBps)
+
+		bpsOld = "inf"
+		bpsNew = "inf"
+		if e.ingressBps != 0 {
+			bpsOld = strconv.FormatUint(e.ingressBps, 10)
+		}
+		if ingressBps != 0 {
+			bpsNew = strconv.FormatUint(ingressBps, 10)
+		}
+		e.getLogger().Debugf("Updating %s from %s to %s bytes/sec", bandwidth.IngressBandwidth,
+			bpsOld, bpsNew)
+
+		e.ingressBps = ingressBps
+	} else {
+		ev.bwm.DeleteIngressBandwidthLimit(e.ID)
+	}
+
 	res <- &EndpointRegenerationResult{
 		err: nil,
 	}

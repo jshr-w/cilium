@@ -7,10 +7,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/cilium/fake"
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	timestamp "google.golang.org/protobuf/types/known/timestamppb"
 
@@ -27,6 +28,17 @@ func (bwc *bytesWriteCloser) Close() error { return nil }
 type ioWriteCloser struct{ io.Writer }
 
 func (wc *ioWriteCloser) Close() error { return nil }
+
+func TestNewExporterLogOptionsJSON(t *testing.T) {
+	// when slog encounters a marshalling error, it stores it in the field with
+	// the prefix '!ERROR'. Example:
+	//   {..., "options":"!ERROR:json: unsupported type: exporter.NewWriterFunc"}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	_, err := NewExporter(log)
+	assert.NoError(t, err)
+	assert.NotContains(t, buf.String(), "!ERROR")
+}
 
 func TestExporter(t *testing.T) {
 	// override node name for unit test.
@@ -48,11 +60,10 @@ func TestExporter(t *testing.T) {
 		{Timestamp: &timestamp.Timestamp{Seconds: 4}, Event: &observerpb.LostEvent{}},
 	}
 	buf := &bytesWriteCloser{bytes.Buffer{}}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(t)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 
@@ -120,11 +131,10 @@ func TestExporterWithFilters(t *testing.T) {
 		},
 	}
 	buf := &bytesWriteCloser{bytes.Buffer{}}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(t)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 
@@ -171,11 +181,10 @@ func TestEventToExportEvent(t *testing.T) {
 	}()
 
 	buf := &bytesWriteCloser{bytes.Buffer{}}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(t)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 
@@ -254,11 +263,10 @@ func TestExporterWithFieldMask(t *testing.T) {
 		},
 	}
 	buf := &bytesWriteCloser{bytes.Buffer{}}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(t)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 	for _, opt := range []Option{
@@ -279,7 +287,7 @@ func TestExporterWithFieldMask(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	//nolint: testifylint
+	// nolint: testifylint
 	assert.Equal(t, `{"flow":{"source":{"namespace":"nsA","pod_name":"podA"}}}
 {"flow":{}}
 `, buf.String())
@@ -319,11 +327,10 @@ func TestExporterOnExportEvent(t *testing.T) {
 	var abortRequested bool
 
 	buf := &bytesWriteCloser{bytes.Buffer{}}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(t)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 	for _, opt := range []Option{
@@ -367,7 +374,7 @@ func TestExporterOnExportEvent(t *testing.T) {
 	assert.Falsef(t, hookNoOpFuncCalledAfterAbort, "hook no-op func was called after abort requested by previous hook")
 
 	// ensure that aborting OnExportEvent hook processing works (debug_event should not be exported)
-	//nolint: testifylint
+	// nolint: testifylint
 	assert.Equal(t, `{"Timestamp":{"seconds":3},"Event":{}}
 {"flow":{"time":"1970-01-01T00:00:01Z","node_name":"my-node"},"node_name":"my-node","time":"1970-01-01T00:00:01Z"}
 `, buf.String())
@@ -440,11 +447,10 @@ func BenchmarkExporter(b *testing.B) {
 	}
 
 	buf := &ioWriteCloser{io.Discard}
-	log := logrus.New()
-	log.SetOutput(io.Discard)
+	log := hivetest.Logger(b)
 
 	opts := DefaultOptions
-	opts.NewWriterFunc = func() (io.WriteCloser, error) {
+	opts.newWriterFunc = func() (io.WriteCloser, error) {
 		return buf, nil
 	}
 	for _, opt := range []Option{

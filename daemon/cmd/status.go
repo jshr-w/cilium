@@ -358,7 +358,9 @@ func (d *Daemon) getKubeProxyReplacementStatus() *models.KubeProxyReplacement {
 		features.Annotations = append(features.Annotations, annotation.ServiceForwardingMode)
 	}
 	features.Annotations = append(features.Annotations, annotation.ServiceNodeExposure)
+	features.Annotations = append(features.Annotations, annotation.ServiceNodeSelectorExposure)
 	features.Annotations = append(features.Annotations, annotation.ServiceTypeExposure)
+	features.Annotations = append(features.Annotations, annotation.ServiceProxyDelegation)
 	if option.Config.EnableSVCSourceRangeCheck {
 		features.Annotations = append(features.Annotations, annotation.ServiceSourceRangesPolicy)
 	}
@@ -396,7 +398,7 @@ func (d *Daemon) getBPFMapStatus() *models.BPFMapStatus {
 				Size: int64(option.Config.CTMapEntriesGlobalTCP),
 			},
 			{
-				Name: "Endpoint policy",
+				Name: "Endpoints",
 				Size: int64(lxcmap.MaxEntries),
 			},
 			{
@@ -456,8 +458,12 @@ func (d *Daemon) getBPFMapStatus() *models.BPFMapStatus {
 				Size: int64(option.Config.NeighMapEntriesGlobal),
 			},
 			{
-				Name: "Global policy",
-				Size: int64(option.Config.PolicyMapEntries),
+				Name: "Endpoint policy",
+				Size: int64(d.policyMapFactory.PolicyMaxEntries()),
+			},
+			{
+				Name: "Policy stats",
+				Size: int64(d.policyMapFactory.StatsMaxEntries()),
 			},
 			{
 				Name: "Session affinity",
@@ -612,14 +618,6 @@ func (d *Daemon) startStatusCollector(ctx context.Context, cleaner *daemonCleanu
 				}
 
 				if kvstore, ok := status.Data.(*models.Status); ok {
-					if kvstore.State == models.StatusStateWarning && option.Config.KVstorePodNetworkSupport {
-						// Don't treat warnings as errors when the support for running
-						// etcd in pod network is enabled. This is necessary to allow
-						// Cilium turning ready even before connecting to the kvstore,
-						// and break the chicken-and-egg dependency during startup.
-						kvstore.State = models.StatusStateOk
-					}
-
 					d.statusResponse.Kvstore = kvstore
 				}
 			},
@@ -873,11 +871,7 @@ func (d *Daemon) startStatusCollector(ctx context.Context, cleaner *daemonCleanu
 		{
 			Name: "kube-proxy-replacement",
 			Probe: func(ctx context.Context) (interface{}, error) {
-				if d.clientset.IsEnabled() || option.Config.LoadBalancerOnly {
-					return d.getKubeProxyReplacementStatus(), nil
-				} else {
-					return nil, nil
-				}
+				return d.getKubeProxyReplacementStatus(), nil
 			},
 			OnStatusUpdate: func(status status.Status) {
 				d.statusCollectMutex.Lock()

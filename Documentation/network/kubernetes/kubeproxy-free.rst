@@ -384,11 +384,46 @@ service type:
       - port: 80
         targetPort: 80
     type: LoadBalancer
+    allocateLoadBalancerNodePorts: false
 
 In the above example only the ``LoadBalancer`` service is created without
 corresponding ``NodePort`` and ``ClusterIP`` services. If the annotation
 would be set to e.g. ``service.cilium.io/type: NodePort``, then only the
 ``NodePort`` service would be installed.
+
+Host Proxy Delegation
+*********************
+
+If the selected service backend IP for a given service matches the local
+node IP, the annotation ``service.cilium.io/proxy-delegation: delegate-if-local``
+will pass the received packet unmodified to the upper stack, so that a
+L7 proxy such as Envoy (if present) can handle the request in the host
+namespace.
+
+If the selected service backend is a remote IP, then the received packet
+is not pushed to the upper stack and instead the BPF code forwards the
+packet natively with the configured forwarding method to the remote IP.
+
+.. code-block:: yaml
+
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: example-service
+    annotations:
+      service.cilium.io/proxy-delegation: delegate-if-local
+  spec:
+    ports:
+      - port: 80
+        targetPort: 80
+    type: LoadBalancer
+
+In combination with ``externalTrafficPolicy=Local`` this mechanism also allows
+for pushing all traffic to the upper proxy.
+
+Non-presence of the ``service.cilium.io/proxy-delegation`` annotation leaves
+all forwarding to BPF natively which is also the default for the kube-proxy
+replacement case.
 
 Selective Service Node Exposure
 *******************************
@@ -419,6 +454,27 @@ To add a new service that should only be exposed to nodes with label ``service.c
         targetPort: 9376
     type: LoadBalancer
 
+It's also possible to control the service node exposure via the annotation ``service.cilium.io/node-selector`` - where
+the annotation value contains the label selector. This way, the service is only exposed on nodes that match the
+node label selector. The annotation ``service.cilium.io/node-selector`` always has priority over 
+``service.cilium.io/node`` if both exist on the same service.
+
+.. code-block:: yaml
+
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: example-service
+    annotations:
+      service.cilium.io/node-selector: "service.cilium.io/node in ( beefy , slow )"
+  spec:
+    selector:
+      app: example
+    ports:
+      - port: 8765
+        targetPort: 9376
+    type: LoadBalancer
+
 Note that changing a node label after a service has been exposed matching that label does not
 automatically update the list of nodes where the service is exposed. To update exposure of the
 service after changing node labels, restart the Cilium agent. Generally it is advised to fixate the
@@ -430,7 +486,7 @@ Maglev Consistent Hashing
 *************************
 
 Cilium's eBPF kube-proxy replacement supports consistent hashing by implementing a variant
-of `The Maglev hashing <https://storage.googleapis.com/pub-tools-public-publication-data/pdf/44824.pdf>`_
+of `The Maglev hashing <https://static.googleusercontent.com/media/research.google.com/ko//pubs/archive/44824.pdf>`_
 in its load balancer for backend selection. This improves resiliency in case of
 failures. As well, it provides better load balancing properties since Nodes added to the cluster will
 make consistent backend selection throughout the cluster for a given 5-tuple without
@@ -459,7 +515,7 @@ There are two more Maglev-specific configuration settings: ``maglev.tableSize``
 and ``maglev.hashSeed``.
 
 ``maglev.tableSize`` specifies the size of the Maglev lookup table for each single service.
-`Maglev <https://storage.googleapis.com/pub-tools-public-publication-data/pdf/44824.pdf>`__
+`Maglev <https://static.googleusercontent.com/media/research.google.com/ko//pubs/archive/44824.pdf>`__
 recommends the table size (``M``) to be significantly larger than the number of maximum expected
 backends (``N``). In practice that means that ``M`` should be larger than ``100 * N`` in
 order to guarantee the property of at most 1% difference in the reassignments on backend
@@ -1712,6 +1768,21 @@ External Access To ClusterIP Services
 As per `k8s Service <https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types>`__,
 Cilium's eBPF kube-proxy replacement by default disallows access to a ClusterIP service from outside the cluster.
 This can be allowed by setting ``bpf.lbExternalClusterIP=true``.
+
+Kubernetes API server high availability
+***************************************
+
+If you are running multiple instances of Kubernetes API servers in your cluster, you can set the ``k8s-api-server-urls`` flag
+so that Cilium can fail over to an active instance. Cilium switches to the ``kubernetes`` service address so that
+API requests are load-balanced to API server endpoints during runtime. However, if the initially configured API servers
+are rotated while the agent is down, you can update the ``k8s-api-server-urls`` flag with the updated API servers.
+
+.. parsed-literal::
+
+    helm install cilium |CHART_RELEASE| \\
+        --namespace kube-system \\
+        --set kubeProxyReplacement=true \\
+        --set k8s.apiServerURLs="https://172.21.0.4:6443 https://172.21.0.5:6443 https://172.21.0.6:6443"
 
 Observability
 *************

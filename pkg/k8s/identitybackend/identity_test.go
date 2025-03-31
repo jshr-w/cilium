@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -184,13 +185,14 @@ func TestGetIdentity(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
-			_, client := k8sClient.NewFakeClientset()
-			backend, err := NewCRDBackend(CRDBackendConfiguration{
-				Store:    nil,
-				StoreSet: &atomic.Bool{},
-				Client:   client,
-				KeyFunc:  (&key.GlobalIdentity{}).PutKeyFromMap,
-			})
+			_, client := k8sClient.NewFakeClientset(hivetest.Logger(t))
+			backend, err := NewCRDBackend(hivetest.Logger(t),
+				CRDBackendConfiguration{
+					Store:    nil,
+					StoreSet: &atomic.Bool{},
+					Client:   client,
+					KeyFunc:  (&key.GlobalIdentity{}).PutKeyFromMap,
+				})
 			if err != nil {
 				t.Fatalf("Can't create CRD Backend: %s", err)
 			}

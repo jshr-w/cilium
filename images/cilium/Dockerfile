@@ -1,12 +1,12 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:60b838bf27ad75ca16cc2c8744cb30d277b0c22f@sha256:7f44e1c2f8c11f342cba5a07ca7881db1e0c8bb2633f641c945ad68ab6eed21c
-ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:9063ac04577df342a303e995e4e7e31aa1042f69@sha256:fb1f5cff7659a3e16a5789e5ce58a566b32bf123350895be84d027de890b7682
+ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:2c1e72a42300a4598aa5c6bc277636551cff46de@sha256:897fd5b122a1cf3c5013b6e44632b7af05398dd87ea27f1b0c8ae073b59c67b4
+ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:e65085ae25146e444896e13c53df23c8e56281c9@sha256:f516e7c960f491949ddde95fc306e953ab1de80f1fb1f7b40757f76b6661f043
 #
 # cilium-envoy from github.com/cilium/proxy
 #
-ARG CILIUM_ENVOY_IMAGE=quay.io/cilium/cilium-envoy:v1.32.3-1737536179-7717128c4e264aa4ec7e43f6bb795ab854340b16@sha256:0a62df4ef2e56b428414cc9b68404ec5edb6fab3f590371a614238ab9d82b408
+ARG CILIUM_ENVOY_IMAGE=quay.io/cilium/cilium-envoy:v1.33.2-1742995211-ca0b42f0ecdf835224a8ddfc6fe0442368d4d766@sha256:1069f1f0ecda0f12de4406fa9510c81b23032e5e2c6f3efba6c8e3d829a4ba1e
 
 FROM ${CILIUM_ENVOY_IMAGE} AS cilium-envoy
 
@@ -53,7 +53,7 @@ RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium \
     mv LICENSE.all /tmp/install/${TARGETOS}/${TARGETARCH}/LICENSE.all && \
     mkdir -p /tmp/hubble/${TARGETOS}/${TARGETARCH} && \
     cd hubble && \
-    make GOOS=${TARGETOS} GOARCH=${TARGETARCH} && \
+    make GOOS=${TARGETOS} GOARCH=${TARGETARCH} $(echo $MODIFIERS | tr -d '"') && \
     mv hubble /tmp/hubble/${TARGETOS}/${TARGETARCH}/hubble
 
 # Extract debug symbols to /tmp/debug and strip the binaries if NOSTRIP is not set.

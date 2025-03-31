@@ -4,16 +4,13 @@
 #include "common.h"
 #include <bpf/ctx/skb.h>
 #include "pktgen.h"
-#define ROUTER_IP
-#define HOST_IP
-#undef ROUTER_IP
-#undef HOST_IP
 
 #define ENABLE_IPV4
 #define ENABLE_IPV6
-#define SECCTX_FROM_IPCACHE 1
 
 #include "bpf_host.c"
+
+ASSIGN_CONFIG(__u32, host_secctx_from_ipcache, 1)
 
 #include "lib/ipcache.h"
 #include "lib/endpoint.h"
@@ -111,9 +108,8 @@ int ipv6_from_netdev_ns_for_pod_check(const struct __ctx_buff *ctx)
 	if ((void *)l3 + sizeof(struct ipv6hdr) > data_end)
 		test_fatal("l3 out of bounds");
 
-	union v6addr router_ip;
+	union v6addr router_ip = CONFIG(router_ipv6);
 
-	BPF_V6(router_ip, ROUTER_IP);
 	if (memcmp((__u8 *)&l3->saddr, (__u8 *)&router_ip, 16) != 0)
 		test_fatal("src IP hasn't been set to router IP");
 
@@ -161,10 +157,7 @@ int ipv6_from_netdev_ns_for_node_ip_pktgen(struct __ctx_buff *ctx)
 	if (!l4)
 		return TEST_ERROR;
 
-	union v6addr node_ip;
-
-	BPF_V6(node_ip, HOST_IP);
-	data = pktgen__push_data(&builder, (__u8 *)&node_ip, 16);
+	data = pktgen__push_data(&builder, (__u8 *)v6_node_one, 16);
 	if (!data)
 		return TEST_ERROR;
 
@@ -179,10 +172,7 @@ int ipv6_from_netdev_ns_for_node_ip_pktgen(struct __ctx_buff *ctx)
 SETUP("tc", "02_ipv6_from_netdev_ns_for_node_ip")
 int ipv6_from_netdev_ns_for_node_ip_setup(struct __ctx_buff *ctx)
 {
-	union v6addr node_ip;
-
-	BPF_V6(node_ip, HOST_IP);
-	endpoint_v6_add_entry((union v6addr *)&node_ip, 0, 0, ENDPOINT_F_HOST, 0,
+	endpoint_v6_add_entry((union v6addr *)v6_node_one, 0, 0, ENDPOINT_F_HOST, 0,
 			      (__u8 *)mac_three, (__u8 *)mac_two);
 	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	return TEST_ERROR;
@@ -246,10 +236,7 @@ int ipv6_from_netdev_ns_for_node_ip_check(const struct __ctx_buff *ctx)
 	if ((void *)payload + 24 > data_end)
 		test_fatal("payload out of bounds");
 
-	union v6addr node_ip;
-
-	BPF_V6(node_ip, HOST_IP);
-	if (memcmp(payload, (__u8 *)&node_ip, 16) != 0)
+	if (memcmp(payload, (__u8 *)v6_node_one, 16) != 0)
 		test_fatal("icmp6 payload target was changed");
 
 	test_finish();

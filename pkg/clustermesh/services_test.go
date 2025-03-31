@@ -13,7 +13,6 @@ import (
 
 	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/statedb"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -62,13 +61,15 @@ func (s *ClusterMeshServicesTestSuite) prepareServiceUpdate(tb testing.TB, clust
 }
 
 type ClusterMeshServicesTestSuite struct {
-	svcCache   *k8s.ServiceCache
+	svcCache   *k8s.ServiceCacheImpl
 	mesh       *ClusterMesh
 	randomName string
 }
 
 func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
 	testutils.IntegrationTest(tb)
+
+	logger := hivetest.Logger(tb)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -90,7 +91,7 @@ func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
 	err = db.RegisterTable(nodeAddrs)
 	require.NoError(tb, err)
 
-	s.svcCache = k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	s.svcCache = k8s.NewServiceCache(hivetest.Logger(tb), db, nodeAddrs, k8s.NewSVCMetricsNoop())
 
 	mgr := cache.NewCachingIdentityAllocator(&testidentity.IdentityAllocatorOwnerMock{}, cache.AllocatorConfig{})
 	// The nils are only used by k8s CRD identities. We default to kvstore.
@@ -120,7 +121,7 @@ func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
 		Context: ctx,
 	})
 	defer ipc.Shutdown()
-	store := store.NewFactory(store.MetricsProvider())
+	store := store.NewFactory(logger, store.MetricsProvider())
 	s.mesh = NewClusterMesh(hivetest.Lifecycle(tb), Configuration{
 		Config:                common.Config{ClusterMeshConfig: dir},
 		ClusterInfo:           cmtypes.ClusterInfo{ID: localClusterID, Name: localClusterName, MaxConnectedClusters: 255},
@@ -133,7 +134,7 @@ func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
 		CommonMetrics:         common.MetricsProvider(subsystem)(),
 		StoreFactory:          store,
 		FeatureMetrics:        NewClusterMeshMetricsNoop(),
-		Logger:                logrus.New(),
+		Logger:                logger,
 	})
 	require.NotNil(tb, s.mesh)
 
@@ -151,7 +152,7 @@ func (s *ClusterMeshServicesTestSuite) expectEvent(t *testing.T, action k8s.Cach
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var event k8s.ServiceEvent
 		select {
-		case event = <-s.svcCache.Events:
+		case event = <-s.svcCache.Events():
 		case <-time.After(defaults.NodeDeleteDelay + timeout):
 			c.Errorf("Timeout while waiting for event to be received")
 		}
@@ -343,7 +344,7 @@ func TestClusterMeshServicesNonGlobal(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 	select {
-	case event := <-s.svcCache.Events:
+	case event := <-s.svcCache.Events():
 		t.Errorf("Unexpected service event received: %+v", event)
 	default:
 	}

@@ -84,14 +84,14 @@ func (h NoOpHandlerWithListDone) OnListDone() {
 func (g *DoubleWriteMetricReporter) Start(ctx cell.HookContext) error {
 	g.logger.Info("Starting the Double Write Metric Reporter")
 
-	kvStoreBackend, err := kvstoreallocator.NewKVStoreBackend(kvstoreallocator.KVStoreBackendConfiguration{BasePath: cache.IdentitiesPath, Suffix: "", Typ: nil, Backend: kvstore.Client()})
+	kvStoreBackend, err := kvstoreallocator.NewKVStoreBackend(g.logger, kvstoreallocator.KVStoreBackendConfiguration{BasePath: cache.IdentitiesPath, Suffix: "", Typ: nil, Backend: kvstore.Client()})
 	if err != nil {
 		g.logger.Error("Unable to initialize kvstore backend for the Double Write Metric Reporter", logfields.Error, err)
 		return err
 	}
 	g.kvStoreBackend = kvStoreBackend
 
-	crdBackend, err := identitybackend.NewCRDBackend(identitybackend.CRDBackendConfiguration{Store: nil, StoreSet: &atomic.Bool{}, Client: g.clientset, KeyFunc: (&key.GlobalIdentity{}).PutKeyFromMap})
+	crdBackend, err := identitybackend.NewCRDBackend(g.logger, identitybackend.CRDBackendConfiguration{Store: nil, StoreSet: &atomic.Bool{}, Client: g.clientset, KeyFunc: (&key.GlobalIdentity{}).PutKeyFromMap})
 	if err != nil {
 		g.logger.Error("Unable to initialize CRD backend for the Double Write Metric Reporter", logfields.Error, err)
 		return err
@@ -171,12 +171,14 @@ func (g *DoubleWriteMetricReporter) compareCRDAndKVStoreIdentities(ctx context.C
 		g.logger.Info("CRD and KVStore identities are in sync")
 	} else {
 		g.logger.Info("Detected differences between CRD and KVStore identities",
-			"crd_identity_count", len(crdIdentityIds),
-			"kvstore_identity_count", len(kvstoreIdentityIds),
-			"only_in_crd_count", onlyInCrdCount,
-			"only_in_kvstore_count", onlyInKVStoreCount,
-			"only_in_crd_sample", onlyInCrdSample,
-			"only_in_kvstore_sample", onlyInKVStoreSample)
+			logfields.CRDIdentityCount, len(crdIdentityIds),
+			logfields.KVStoreIdentityCount, len(kvstoreIdentityIds),
+			logfields.OnlyInCRDCount, onlyInCrdCount,
+			logfields.OnlyInKVStoreCount, onlyInKVStoreCount,
+			logfields.OnlyInCRDSample, onlyInCrdSample,
+			logfields.OnlyInKVStoreSample, onlyInKVStoreSample,
+		)
+
 	}
 
 	return nil

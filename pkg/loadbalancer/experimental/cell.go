@@ -14,7 +14,7 @@ import (
 )
 
 var Cell = cell.Module(
-	"loadbalancer-experimental",
+	"loadbalancer",
 	"Experimental load-balancing control-plane",
 
 	cell.Config(DefaultConfig),
@@ -35,25 +35,34 @@ var Cell = cell.Module(
 	ReconcilerCell,
 
 	// Provide [lbmaps], abstraction for the load-balancing BPF map access.
-	cell.ProvidePrivate(newLBMaps, newLBMapsConfig),
+	cell.ProvidePrivate(newLBMaps),
 
 	// Provide the 'lb/' script commands for debugging and testing.
 	cell.Provide(scriptCommands),
 
-	//
 	// Health server runs an HTTP server for each service on port [HealthCheckNodePort]
 	// (when non-zero) and responds with the number of healthy backends.
 	healthServerCell,
 
+	// Register a background job to re-reconcile NodePort and HostPort frontends when
+	// the node addresses change.
 	cell.Invoke(registerNodePortAddressReconciler),
+
+	// Register a background job to watch for node zone label changes.
+	cell.Invoke(registerNodeZoneWatcher),
+
+	// Replace the [k8s.ServiceCacheReader] and [service.ServiceReader] if this
+	// implementation is enabled.
+	cell.Provide(newAdapters),
+	cell.DecorateAll(decorateAdapters),
 )
 
 // TablesCell provides the [Writer] API for configuring load-balancing and the
 // Table[*Service], Table[*Frontend] and Table[*Backend] for read-only access
 // to load-balancing state.
 var TablesCell = cell.Module(
-	"tables",
-	"Experimental load-balancing control-plane",
+	"loadbalancer-tables",
+	"Tables for load-balancing",
 
 	// Provide the RWTable[Service] and RWTable[Backend] privately to this
 	// module so that the tables are only modified via the Services API.

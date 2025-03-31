@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/statedb"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/cache"
@@ -50,10 +51,6 @@ func (m mockStore[T]) CacheStore() cache.Store {
 	panic("not implemented")
 }
 
-func (m mockStore[T]) Release() {
-	panic("not implemented")
-}
-
 func namespaceKey(name string) resource.Key {
 	return resource.Key{
 		Name: name,
@@ -65,7 +62,8 @@ func TestManager_GetIPPoolForPod(t *testing.T) {
 	pods, err := k8s.NewPodTable(db)
 	require.NoError(t, err, "NewPodTable")
 	m := &manager{
-		db: db,
+		logger: hivetest.Logger(t),
+		db:     db,
 		namespaceStore: mockStore[*slim_core_v1.Namespace]{
 			namespaceKey("default"): &slim_core_v1.Namespace{},
 			namespaceKey("special"): &slim_core_v1.Namespace{

@@ -17,7 +17,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	baseclocktest "k8s.io/utils/clock/testing"
@@ -242,9 +241,9 @@ func TestRemoteClusterRun(t *testing.T) {
 				kvs:               tt.kvs,
 			}
 
-			st := store.NewFactory(store.MetricsProvider())
+			st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
 			fakeclock := baseclocktest.NewFakeClock(time.Now())
-			km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New(), clock: fakeclock}
+			km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
 
 			rc := km.newRemoteCluster("foo", nil)
 			ready := make(chan error)
@@ -380,9 +379,9 @@ func TestRemoteClusterRemove(t *testing.T) {
 		},
 	}
 
-	st := store.NewFactory(store.MetricsProvider())
+	st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
 	fakeclock := baseclocktest.NewFakeClock(time.Now())
-	km := KVStoreMesh{backend: wrapper, storeFactory: st, logger: logrus.New(), clock: fakeclock}
+	km := KVStoreMesh{backend: wrapper, storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
 	rcs := make(map[string]*remoteCluster)
 	for _, cluster := range []string{"foo", "foobar", "baz"} {
 		rcs[cluster] = km.newRemoteCluster(cluster, nil).(*remoteCluster)
@@ -547,6 +546,7 @@ func TestRemoteClusterRemoveShutdown(t *testing.T) {
 	h := hive.New(
 		Cell,
 
+		store.Cell,
 		cell.Provide(
 			func() types.ClusterInfo { return types.ClusterInfo{ID: 10, Name: "local"} },
 			func() Config { return DefaultConfig },
@@ -620,8 +620,8 @@ func TestRemoteClusterStatus(t *testing.T) {
 			"cilium/state/ip/v1/default/qux":         "qux10",
 		},
 	}
-	st := store.NewFactory(store.MetricsProvider())
-	km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New()}
+	st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
+	km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: hivetest.Logger(t)}
 
 	rc := km.newRemoteCluster("foo", func() *models.RemoteCluster {
 		return &models.RemoteCluster{
@@ -755,14 +755,14 @@ func TestRemoteClusterSync(t *testing.T) {
 			km := KVStoreMesh{
 				config: tt.config,
 				common: mockClusterMesh,
-				logger: logrus.New(),
+				logger: hivetest.Logger(t),
 			}
 
 			rc := &remoteCluster{
 				name:         "foo",
 				synced:       newSynced(),
 				readyTimeout: tt.config.PerClusterReadyTimeout,
-				logger:       km.logger.WithField(logfields.ClusterName, "foo"),
+				logger:       km.logger.With(logfields.ClusterName, "foo"),
 			}
 			swgDone := rc.synced.resources.Add()
 			rc.synced.resources.Stop()

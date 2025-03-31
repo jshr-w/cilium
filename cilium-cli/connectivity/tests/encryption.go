@@ -213,10 +213,17 @@ func isWgEncap(t *check.Test) bool {
 // The checks are implemented by curl'ing a server pod from a client pod, and
 // then inspecting tcpdump captures from the client pod's node.
 func PodToPodEncryption(reqs ...features.Requirement) check.Scenario {
-	return &podToPodEncryption{reqs}
+	return &podToPodEncryption{
+		reqs:         reqs,
+		ScenarioBase: check.NewScenarioBase(),
+	}
 }
 
-type podToPodEncryption struct{ reqs []features.Requirement }
+type podToPodEncryption struct {
+	check.ScenarioBase
+
+	reqs []features.Requirement
+}
 
 func (s *podToPodEncryption) Name() string {
 	return "pod-to-pod-encryption"
@@ -251,14 +258,7 @@ func (s *podToPodEncryption) Run(ctx context.Context, t *check.Test) {
 		t.Debug("Encapsulation before WG encryption")
 	}
 
-	e, ok := t.Context().Feature(features.EncryptionPod)
-	isIPSec := ok && e.Enabled && e.Mode == "ipsec"
-
 	t.ForEachIPFamily(func(ipFam features.IPFamily) {
-		if isIPSec && ipFam == features.IPFamilyV6 {
-			t.Debugf("Inactive IPv6 test with IPSec, see https://github.com/cilium/cilium/issues/35485")
-			return
-		}
 		testNoTrafficLeak(ctx, t, s, client, &server, &clientHost, &serverHost, requestHTTP, ipFam, assertNoLeaks, true, wgEncap)
 	})
 }
@@ -295,7 +295,7 @@ func testNoTrafficLeak(ctx context.Context, t *check.Test, s check.Scenario,
 	case requestHTTP:
 		// Curl the server from the client to generate some traffic
 		t.NewAction(s, fmt.Sprintf("curl-%s", ipFam), client, server, ipFam).Run(func(a *check.Action) {
-			a.ExecInPod(ctx, t.Context().CurlCommand(server, ipFam))
+			a.ExecInPod(ctx, a.CurlCommand(server))
 			srcSniffer.Validate(ctx, a)
 			if dstSniffer != nil {
 				dstSniffer.Validate(ctx, a)
@@ -373,10 +373,17 @@ func nodeToNodeEncTestPods(nodes map[check.NodeIdentity]*ciliumv2.CiliumNode, ex
 }
 
 func NodeToNodeEncryption(reqs ...features.Requirement) check.Scenario {
-	return &nodeToNodeEncryption{reqs}
+	return &nodeToNodeEncryption{
+		reqs:         reqs,
+		ScenarioBase: check.NewScenarioBase(),
+	}
 }
 
-type nodeToNodeEncryption struct{ reqs []features.Requirement }
+type nodeToNodeEncryption struct {
+	check.ScenarioBase
+
+	reqs []features.Requirement
+}
 
 func (s *nodeToNodeEncryption) Name() string {
 	return "node-to-node-encryption"

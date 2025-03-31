@@ -18,24 +18,27 @@
 #include <linux/if_ether.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/icmp.h>
 #include <linux/icmpv6.h>
 
 /* A collection of pre-defined Ethernet MAC addresses, so tests can reuse them
  * without having to come up with custom addresses.
- *
- * These are declared as volatile const to make them end up in .rodata. Cilium
- * inlines global data from .data into bytecode as immediate values for compat
- * with kernels before 5.2 that lack read-only map support. This test suite
- * doesn't make the same assumptions, so disable the static data inliner by
- * putting variables in another section.
  */
-static volatile const __u8 mac_one[] =   {0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xEF};
-static volatile const __u8 mac_two[] =   {0x13, 0x37, 0x13, 0x37, 0x13, 0x37};
-static volatile const __u8 mac_three[] = {0x31, 0x41, 0x59, 0x26, 0x35, 0x89};
-static volatile const __u8 mac_four[] =  {0x0D, 0x1D, 0x22, 0x59, 0xA9, 0xC2};
-static volatile const __u8 mac_five[] =  {0x15, 0x21, 0x39, 0x45, 0x4D, 0x5D};
-static volatile const __u8 mac_six[] =   {0x08, 0x14, 0x1C, 0x32, 0x52, 0x7E};
-static volatile const __u8 mac_zero[] =  {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
+#define mac_one_addr {0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xEF}
+#define mac_two_addr {0x13, 0x37, 0x13, 0x37, 0x13, 0x37}
+#define mac_three_addr {0x31, 0x41, 0x59, 0x26, 0x35, 0x89}
+#define mac_four_addr {0x0D, 0x1D, 0x22, 0x59, 0xA9, 0xC2}
+#define mac_five_addr {0x15, 0x21, 0x39, 0x45, 0x4D, 0x5D}
+#define mac_six_addr {0x08, 0x14, 0x1C, 0x32, 0x52, 0x7E}
+#define mac_zero_addr {0x0, 0x0, 0x0, 0x0, 0x0, 0x0}
+
+volatile const __u8 mac_one[] = mac_one_addr;
+volatile const __u8 mac_two[] = mac_two_addr;
+volatile const __u8 mac_three[] = mac_three_addr;
+volatile const __u8 mac_four[] = mac_four_addr;
+volatile const __u8 mac_five[] = mac_five_addr;
+volatile const __u8 mac_six[] = mac_six_addr;
+volatile const __u8 mac_zero[] = mac_zero_addr;
 
 /* A collection of pre-defined IP addresses, so tests can reuse them without
  *  having to come up with custom ips.
@@ -66,20 +69,22 @@ static volatile const __u8 mac_zero[] =  {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
 #define v4_all	IPV4(0, 0, 0, 0)
 
 /* IPv6 addresses for pods in the cluster */
-static volatile const __section(".rodata") __u8 v6_pod_one[] = {0xfd, 0x04, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 1};
-static volatile const __section(".rodata") __u8 v6_pod_two[] = {0xfd, 0x04, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 2};
-static volatile const __section(".rodata") __u8 v6_pod_three[] = {0xfd, 0x04, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 3};
+#define v6_pod_one_addr {0xfd, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define v6_pod_two_addr {0xfd, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+#define v6_pod_three_addr {0xfd, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3}
+
+volatile const __u8 v6_pod_one[] = v6_pod_one_addr;
+volatile const __u8 v6_pod_two[] = v6_pod_two_addr;
+volatile const __u8 v6_pod_three[] = v6_pod_three_addr;
 
 /* IPv6 addresses for nodes in the cluster */
-static volatile const __section(".rodata") __u8 v6_node_one[] = {0xfd, 0x05, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 1};
-static volatile const __section(".rodata") __u8 v6_node_two[] = {0xfd, 0x06, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 2};
-static volatile const __section(".rodata") __u8 v6_node_three[] = {0xfd, 0x07, 0, 0, 0, 0, 0, 0,
-					   0, 0, 0, 0, 0, 0, 0, 3};
+#define v6_node_one_addr {0xfd, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define v6_node_two_addr {0xfd, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+#define v6_node_three_addr {0xfd, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3}
+
+volatile const __u8 v6_node_one[] = v6_node_one_addr;
+volatile const __u8 v6_node_two[] = v6_node_two_addr;
+volatile const __u8 v6_node_three[] = v6_node_three_addr;
 
 /* Source port to be used by a client */
 #define tcp_src_one	__bpf_htons(22330)
@@ -427,6 +432,13 @@ struct tcphdr *pktgen__push_default_tcphdr(struct pktgen *builder)
 
 static __always_inline
 __attribute__((warn_unused_result))
+struct icmphdr *pktgen__push_icmphdr(struct pktgen *builder)
+{
+	return pktgen__push_rawhdr(builder, sizeof(struct icmphdr), PKT_LAYER_ICMP);
+}
+
+static __always_inline
+__attribute__((warn_unused_result))
 struct icmp6hdr *pktgen__push_icmp6hdr(struct pktgen *builder)
 {
 	return pktgen__push_rawhdr(builder, sizeof(struct icmp6hdr), PKT_LAYER_ICMPV6);
@@ -684,6 +696,40 @@ pktgen__push_ipv4_vxlan_packet(struct pktgen *builder,
 		return NULL;
 
 	return pktgen__push_default_vxlanhdr(builder);
+}
+
+static __always_inline struct icmphdr *
+pktgen__push_ipv4_icmp_packet(struct pktgen *builder,
+			      __u8 *smac, __u8 *dmac,
+			      __be32 saddr, __be32 daddr,
+			      __u8 icmp_type)
+{
+	struct ethhdr *l2;
+	struct iphdr *l3;
+	struct icmphdr *l4;
+
+	l2 = pktgen__push_ethhdr(builder);
+	if (!l2)
+		return NULL;
+
+	ethhdr__set_macs(l2, smac, dmac);
+
+	l3 = pktgen__push_default_iphdr(builder);
+	if (!l3)
+		return NULL;
+
+	l3->saddr = saddr;
+	l3->daddr = daddr;
+
+	l4 = pktgen__push_icmphdr(builder);
+	if (!l4)
+		return NULL;
+
+	l4->type = icmp_type;
+	l4->code = 0;
+	l4->checksum = 0;
+
+	return l4;
 }
 
 static __always_inline struct tcphdr *

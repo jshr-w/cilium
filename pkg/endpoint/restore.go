@@ -23,18 +23,23 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	dptypes "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
+	"github.com/cilium/cilium/pkg/maps/policymap"
+	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -45,9 +50,9 @@ var (
 
 // ReadEPsFromDirNames returns a mapping of endpoint ID to endpoint of endpoints
 // from a list of directory names that can possible contain an endpoint.
-func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGetter policyRepoGetter,
-	namedPortsGetter namedPortsGetter, basePath string, eptsDirNames []string) map[uint16]*Endpoint {
-
+func ReadEPsFromDirNames(ctx context.Context, dnsRulesApi DNSRulesAPI, epBuildQueue EndpointBuildQueue, loader dptypes.Loader, orchestrator dptypes.Orchestrator, compilationLock dptypes.CompilationLock, bandwidthManager dptypes.BandwidthManager, ipTablesManager dptypes.IptablesManager, identityManager identitymanager.IDManager, monitorAgent monitoragent.Agent, policyMapFactory policymap.Factory, policyRepo policy.PolicyRepository,
+	namedPortsGetter namedPortsGetter, basePath string, eptsDirNames []string,
+) map[uint16]*Endpoint {
 	completeEPDirNames, incompleteEPDirNames := partitionEPDirNamesByRestoreStatus(eptsDirNames)
 
 	if len(incompleteEPDirNames) > 0 {
@@ -78,7 +83,7 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 			continue
 		}
 
-		ep, err := parseEndpoint(ctx, owner, policyGetter, namedPortsGetter, state)
+		ep, err := parseEndpoint(dnsRulesApi, epBuildQueue, loader, orchestrator, compilationLock, bandwidthManager, ipTablesManager, identityManager, monitorAgent, policyMapFactory, policyRepo, namedPortsGetter, state)
 		if err != nil {
 			scopedLog.WithError(err).Warn("Unable to parse the C header file")
 			continue
@@ -192,6 +197,10 @@ func partitionEPDirNamesByRestoreStatus(eptsDirNames []string) (complete []strin
 // Returns an error if any operation fails while trying to perform the above
 // operations.
 func (e *Endpoint) RegenerateAfterRestore(regenerator *Regenerator, bwm dptypes.BandwidthManager, resolveMetadata MetadataResolverCB) error {
+	if err := e.restoreHostIfindex(); err != nil {
+		return err
+	}
+
 	if err := e.restoreIdentity(regenerator); err != nil {
 		return err
 	}
@@ -212,6 +221,26 @@ func (e *Endpoint) RegenerateAfterRestore(regenerator *Regenerator, bwm dptypes.
 	}
 
 	scopedLog.WithField(logfields.IPAddr, []string{e.GetIPv4Address(), e.GetIPv6Address()}).Info("Restored endpoint")
+	return nil
+}
+
+// restoreHostIfindex looks up the host interface's ifindex using netlink and
+// populates the value in the Endpoint. This used to be left at zero for
+// whatever reason, so the zero ifindex got persisted to disk.
+//
+// Try to populate the ifindex field using netlink so we can rely on it to
+// generate the host's endpoint configuration.
+func (e *Endpoint) restoreHostIfindex() error {
+	if !e.isHost || e.ifIndex != 0 {
+		return nil
+	}
+
+	l, err := safenetlink.LinkByName(e.ifName)
+	if err != nil {
+		return fmt.Errorf("get host interface: %w", err)
+	}
+	e.ifIndex = l.Attrs().Index
+
 	return nil
 }
 
@@ -267,7 +296,7 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 		// If the endpoint is removed, this controller will cancel the allocator
 		// WaitForInitialGlobalIdentities function.
 		controllerName := fmt.Sprintf("waiting-initial-global-identities-ep (%v)", e.ID)
-		var gotInitialGlobalIdentities = make(chan struct{})
+		gotInitialGlobalIdentities := make(chan struct{})
 		e.UpdateController(controllerName,
 			controller.ControllerParams{
 				Group: initialGlobalIdentitiesControllerGroup,
@@ -382,7 +411,6 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 // serializableEndpoint, which contains all of the fields that are needed upon
 // restoring an Endpoint after cilium-agent restarts.
 func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
-
 	return &serializableEndpoint{
 		ID:                       e.ID,
 		ContainerName:            e.GetContainerName(),

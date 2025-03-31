@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/proxy/pkg/policy/api/kafka"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +49,7 @@ func TestComputePolicyEnforcementAndRules(t *testing.T) {
 
 	SetPolicyEnabled(option.DefaultEnforcement)
 
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	repo := td.repo
 
 	fooSelectLabel := labels.ParseSelectLabel("foo")
@@ -260,11 +261,10 @@ func TestComputePolicyEnforcementAndRules(t *testing.T) {
 	ingress, egress, _ = repo.computePolicyEnforcementAndRules(initIdentity)
 	require.False(t, ingress)
 	require.False(t, egress)
-
 }
 
 func BenchmarkParseLabel(b *testing.B) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(b))
 	repo := td.repo
 
 	b.ResetTimer()
@@ -303,7 +303,7 @@ func BenchmarkParseLabel(b *testing.B) {
 }
 
 func TestWildcardL3RulesIngress(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL3 := labels.LabelArray{labels.ParseLabel("L3")}
 	labelsKafka := labels.LabelArray{labels.ParseLabel("kafka")}
@@ -455,14 +455,14 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 			Port:     9092,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeKafka,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeKafka,
+					Priority: ListenerPriorityKafka,
 					L7Rules: api.L7Rules{
 						Kafka: []kafka.PortRule{kafkaRule.Ingress[0].ToPorts[0].Rules.Kafka[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsKafka}}),
@@ -471,14 +471,14 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Ingress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsHTTP}}),
@@ -487,15 +487,15 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 			Port:     9090,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: L7ParserType("tester"),
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: L7ParserType("tester"),
+					Priority: ListenerPriorityProxylib,
 					L7Rules: api.L7Rules{
 						L7Proto: "tester",
 						L7:      []api.PortRuleL7{l7Rule.Ingress[0].ToPorts[0].Rules.L7[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsL7}}),
@@ -503,11 +503,10 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 	})
 
 	td.policyMapEquals(t, expected, nil, &l3Rule, &kafkaRule, &httpRule, &l7Rule, &icmpRule, &icmpV6Rule)
-
 }
 
 func TestWildcardL4RulesIngress(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL4Kafka := labels.LabelArray{labels.ParseLabel("L4-kafka")}
 	labelsL7Kafka := labels.LabelArray{labels.ParseLabel("kafka")}
@@ -593,15 +592,15 @@ func TestWildcardL4RulesIngress(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar1: nil,
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Ingress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
@@ -613,15 +612,15 @@ func TestWildcardL4RulesIngress(t *testing.T) {
 			Port:     9092,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeKafka,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar1: nil,
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeKafka,
+					Priority: ListenerPriorityKafka,
 					L7Rules: api.L7Rules{
 						Kafka: []kafka.PortRule{kafkaRule.Ingress[0].ToPorts[0].Rules.Kafka[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
@@ -635,7 +634,7 @@ func TestWildcardL4RulesIngress(t *testing.T) {
 }
 
 func TestL3DependentL4IngressFromRequires(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	l480Rule := api.Rule{
 		Ingress: []api.IngressRule{
@@ -687,7 +686,7 @@ func TestL3DependentL4IngressFromRequires(t *testing.T) {
 }
 
 func TestL3DependentL4EgressFromRequires(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	l480Rule := api.Rule{
 		Egress: []api.EgressRule{
@@ -760,7 +759,7 @@ func TestL3DependentL4EgressFromRequires(t *testing.T) {
 }
 
 func TestWildcardL3RulesEgress(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL4 := labels.LabelArray{labels.ParseLabel("L4")}
 	labelsDNS := labels.LabelArray{labels.ParseLabel("dns")}
@@ -864,14 +863,14 @@ func TestWildcardL3RulesEgress(t *testing.T) {
 			Port:     53,
 			Protocol: api.ProtoUDP,
 			U8Proto:  0x11,
-			L7Parser: ParserTypeDNS,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeDNS,
+					Priority: ListenerPriorityDNS,
 					L7Rules: api.L7Rules{
 						DNS: []api.PortRuleDNS{dnsRule.Egress[0].ToPorts[0].Rules.DNS[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsDNS}}),
@@ -880,14 +879,14 @@ func TestWildcardL3RulesEgress(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Egress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsHTTP}}),
@@ -916,7 +915,6 @@ func TestWildcardL3RulesEgress(t *testing.T) {
 			Port:     0,
 			Protocol: "ANY",
 			U8Proto:  0x0,
-			L7Parser: "",
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar1: nil,
 			},
@@ -928,7 +926,7 @@ func TestWildcardL3RulesEgress(t *testing.T) {
 }
 
 func TestWildcardL4RulesEgress(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL3DNS := labels.LabelArray{labels.ParseLabel("L3-dns")}
 	labelsL7DNS := labels.LabelArray{labels.ParseLabel("dns")}
@@ -1016,15 +1014,15 @@ func TestWildcardL4RulesEgress(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar1: nil,
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Egress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
@@ -1036,15 +1034,15 @@ func TestWildcardL4RulesEgress(t *testing.T) {
 			Port:     53,
 			Protocol: api.ProtoUDP,
 			U8Proto:  0x11,
-			L7Parser: ParserTypeDNS,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar1: nil,
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeDNS,
+					Priority: ListenerPriorityDNS,
 					L7Rules: api.L7Rules{
 						DNS: []api.PortRuleDNS{dnsRule.Egress[0].ToPorts[0].Rules.DNS[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
@@ -1058,7 +1056,7 @@ func TestWildcardL4RulesEgress(t *testing.T) {
 }
 
 func TestWildcardCIDRRulesEgress(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL3 := labels.LabelArray{labels.ParseLabel("L3")}
 	labelsHTTP := labels.LabelArray{labels.ParseLabel("http")}
@@ -1118,10 +1116,11 @@ func TestWildcardCIDRRulesEgress(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				cachedSelectors[0]: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{{
 							Headers: []string{"X-My-Header: true"},
@@ -1129,7 +1128,6 @@ func TestWildcardCIDRRulesEgress(t *testing.T) {
 							Path:    "/",
 						}},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{cachedSelectors[0]: {labelsHTTP}}),
@@ -1138,7 +1136,6 @@ func TestWildcardCIDRRulesEgress(t *testing.T) {
 			Port:     0,
 			Protocol: api.ProtoAny,
 			U8Proto:  0x0,
-			L7Parser: ParserTypeNone,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				cachedSelectors[0]: nil,
@@ -1151,7 +1148,7 @@ func TestWildcardCIDRRulesEgress(t *testing.T) {
 }
 
 func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL3 := labels.LabelArray{labels.ParseLabel("L3")}
 	labelsKafka := labels.LabelArray{labels.ParseLabel("kafka")}
@@ -1215,7 +1212,6 @@ func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
 			Port:     0,
 			Protocol: "ANY",
 			U8Proto:  0x0,
-			L7Parser: "",
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorWorld:   nil,
 				td.cachedSelectorWorldV4: nil,
@@ -1232,14 +1228,14 @@ func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
 			Port:     9092,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeKafka,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeKafka,
+					Priority: ListenerPriorityKafka,
 					L7Rules: api.L7Rules{
 						Kafka: []kafka.PortRule{kafkaRule.Ingress[0].ToPorts[0].Rules.Kafka[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsKafka}}),
@@ -1248,14 +1244,14 @@ func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  true,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Ingress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsHTTP}}),
@@ -1266,7 +1262,7 @@ func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
 }
 
 func TestWildcardL3RulesEgressToEntities(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	labelsL3 := labels.LabelArray{labels.ParseLabel("L3")}
 	labelsDNS := labels.LabelArray{labels.ParseLabel("dns")}
@@ -1329,7 +1325,6 @@ func TestWildcardL3RulesEgressToEntities(t *testing.T) {
 			Port:     0,
 			Protocol: "ANY",
 			U8Proto:  0x0,
-			L7Parser: "",
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorWorld:   nil,
 				td.cachedSelectorWorldV4: nil,
@@ -1346,14 +1341,14 @@ func TestWildcardL3RulesEgressToEntities(t *testing.T) {
 			Port:     53,
 			Protocol: api.ProtoUDP,
 			U8Proto:  0x11,
-			L7Parser: ParserTypeDNS,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeDNS,
+					Priority: ListenerPriorityDNS,
 					L7Rules: api.L7Rules{
 						DNS: []api.PortRuleDNS{dnsRule.Egress[0].ToPorts[0].Rules.DNS[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsDNS}}),
@@ -1362,14 +1357,14 @@ func TestWildcardL3RulesEgressToEntities(t *testing.T) {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  0x6,
-			L7Parser: ParserTypeHTTP,
 			Ingress:  false,
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
+					L7Parser: ParserTypeHTTP,
+					Priority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
 						HTTP: []api.PortRuleHTTP{httpRule.Egress[0].ToPorts[0].Rules.HTTP[0]},
 					},
-					isRedirect: true,
 				},
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorBar2: {labelsHTTP}}),
@@ -1380,7 +1375,7 @@ func TestWildcardL3RulesEgressToEntities(t *testing.T) {
 }
 
 func TestMinikubeGettingStarted(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	rule1 := api.Rule{
 		EndpointSelector: endpointSelectorA,
@@ -1442,13 +1437,13 @@ func TestMinikubeGettingStarted(t *testing.T) {
 
 	expected := NewL4PolicyMapWithValues(map[string]*L4Filter{"TCP/80": {
 		Port: 80, Protocol: api.ProtoTCP, U8Proto: 6,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Method: "GET", Path: "/"}, {}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress:    true,
@@ -1459,7 +1454,7 @@ func TestMinikubeGettingStarted(t *testing.T) {
 }
 
 func TestIterate(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	repo := td.repo
 
 	numWithEgress := 0
@@ -1534,7 +1529,6 @@ func TestIterate(t *testing.T) {
 // TestDefaultAllow covers the defaulting logic in determining an identity's default rule
 // in the presence or absence of rules that do not enable default-deny mode.
 func TestDefaultAllow(t *testing.T) {
-
 	// Cache policy enforcement value from when test was ran to avoid pollution
 	// across tests.
 	oldPolicyEnable := GetPolicyEnabled()
@@ -1625,7 +1619,7 @@ func TestDefaultAllow(t *testing.T) {
 
 	// three test runs: ingress, egress, and ingress + egress cartesian
 	for i, tc := range ingressCases {
-		td := newTestData()
+		td := newTestData(hivetest.Logger(t))
 		td.addIdentity(fooIdentity)
 		repo := td.repo
 
@@ -1641,7 +1635,7 @@ func TestDefaultAllow(t *testing.T) {
 	}
 
 	for i, tc := range egressCases {
-		td := newTestData()
+		td := newTestData(hivetest.Logger(t))
 		td.addIdentity(fooIdentity)
 		repo := td.repo
 
@@ -1659,7 +1653,7 @@ func TestDefaultAllow(t *testing.T) {
 	// test all combinations of ingress + egress cases
 	for e, etc := range egressCases {
 		for i, itc := range ingressCases {
-			td := newTestData()
+			td := newTestData(hivetest.Logger(t))
 			td.addIdentity(fooIdentity)
 			repo := td.repo
 
@@ -1684,8 +1678,8 @@ func TestDefaultAllow(t *testing.T) {
 func TestReplaceByResource(t *testing.T) {
 	// don't use the full testdata() here, since we want to watch
 	// selectorcache changes carefully
-	repo := NewPolicyRepository(nil, nil, nil, nil, api.NewPolicyMetricsNoop())
-	sc := testNewSelectorCache(nil)
+	repo := NewPolicyRepository(hivetest.Logger(t), nil, nil, nil, nil, api.NewPolicyMetricsNoop())
+	sc := testNewSelectorCache(hivetest.Logger(t), nil)
 	repo.selectorCache = sc
 	assert.Empty(t, sc.selectors)
 
@@ -1832,8 +1826,8 @@ func TestReplaceByResource(t *testing.T) {
 func TestReplaceByLabels(t *testing.T) {
 	// don't use the full testdata() here, since we want to watch
 	// selectorcache changes carefully
-	repo := NewPolicyRepository(nil, nil, nil, nil, api.NewPolicyMetricsNoop())
-	sc := testNewSelectorCache(nil)
+	repo := NewPolicyRepository(hivetest.Logger(t), nil, nil, nil, nil, api.NewPolicyMetricsNoop())
+	sc := testNewSelectorCache(hivetest.Logger(t), nil)
 	repo.selectorCache = sc
 	assert.Empty(t, sc.selectors)
 

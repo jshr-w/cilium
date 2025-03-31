@@ -6,6 +6,8 @@ package envoy
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,7 +31,6 @@ import (
 	envoy_config_tls "github.com/cilium/proxy/go/envoy/extensions/transport_sockets/tls/v3"
 	envoy_type_matcher "github.com/cilium/proxy/go/envoy/type/matcher/v3"
 	"github.com/cilium/proxy/pkg/policy/api/kafka"
-	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -41,6 +42,7 @@ import (
 	"github.com/cilium/cilium/pkg/container/versioned"
 	"github.com/cilium/cilium/pkg/crypto/certificatemanager"
 	"github.com/cilium/cilium/pkg/endpointstate"
+	envoypolicy "github.com/cilium/cilium/pkg/envoy/policy"
 	_ "github.com/cilium/cilium/pkg/envoy/resource"
 	"github.com/cilium/cilium/pkg/envoy/xds"
 	"github.com/cilium/cilium/pkg/lock"
@@ -125,6 +127,8 @@ type XDSServer interface {
 }
 
 type xdsServer struct {
+	logger *slog.Logger
+
 	// socketPath is the path to the gRPC UNIX domain socket.
 	socketPath string
 
@@ -190,7 +194,8 @@ type xdsServer struct {
 
 	localEndpointStore *LocalEndpointStore
 
-	secretManager certificatemanager.SecretManager
+	l7RulesTranslator envoypolicy.EnvoyL7RulesTranslator
+	secretManager     certificatemanager.SecretManager
 }
 
 func toAny(pb proto.Message) *anypb.Any {
@@ -210,15 +215,19 @@ type xdsServerConfig struct {
 	httpRetryCount                int
 	httpRetryTimeout              int
 	httpNormalizePath             bool
+	httpStreamIdleTimeout         int
 	useFullTLSContext             bool
 	useSDS                        bool
 	proxyXffNumTrustedHopsIngress uint32
 	proxyXffNumTrustedHopsEgress  uint32
+	policyRestoreTimeout          time.Duration
+	metrics                       xds.Metrics
 }
 
 // newXDSServer creates a new xDS GRPC server.
-func newXDSServer(restorerPromise promise.Promise[endpointstate.Restorer], ipCache IPCacheEventSource, localEndpointStore *LocalEndpointStore, config xdsServerConfig, secretManager certificatemanager.SecretManager) *xdsServer {
+func newXDSServer(logger *slog.Logger, restorerPromise promise.Promise[endpointstate.Restorer], ipCache IPCacheEventSource, localEndpointStore *LocalEndpointStore, config xdsServerConfig, secretManager certificatemanager.SecretManager) *xdsServer {
 	xdsServer := &xdsServer{
+		logger:             logger,
 		restorerPromise:    restorerPromise,
 		listenerCount:      make(map[string]uint),
 		ipCache:            ipCache,
@@ -248,48 +257,48 @@ func (s *xdsServer) start() error {
 
 func (s *xdsServer) initializeXdsConfigs() {
 	ldsCache := xds.NewCache()
-	ldsMutator := xds.NewAckingResourceMutatorWrapper(ldsCache)
+	ldsMutator := xds.NewAckingResourceMutatorWrapper(ldsCache, s.config.metrics)
 	ldsConfig := &xds.ResourceTypeConfiguration{
 		Source:      ldsCache,
 		AckObserver: ldsMutator,
 	}
 
 	rdsCache := xds.NewCache()
-	rdsMutator := xds.NewAckingResourceMutatorWrapper(rdsCache)
+	rdsMutator := xds.NewAckingResourceMutatorWrapper(rdsCache, s.config.metrics)
 	rdsConfig := &xds.ResourceTypeConfiguration{
 		Source:      rdsCache,
 		AckObserver: rdsMutator,
 	}
 
 	cdsCache := xds.NewCache()
-	cdsMutator := xds.NewAckingResourceMutatorWrapper(cdsCache)
+	cdsMutator := xds.NewAckingResourceMutatorWrapper(cdsCache, s.config.metrics)
 	cdsConfig := &xds.ResourceTypeConfiguration{
 		Source:      cdsCache,
 		AckObserver: cdsMutator,
 	}
 
 	edsCache := xds.NewCache()
-	edsMutator := xds.NewAckingResourceMutatorWrapper(edsCache)
+	edsMutator := xds.NewAckingResourceMutatorWrapper(edsCache, s.config.metrics)
 	edsConfig := &xds.ResourceTypeConfiguration{
 		Source:      edsCache,
 		AckObserver: edsMutator,
 	}
 
 	sdsCache := xds.NewCache()
-	sdsMutator := xds.NewAckingResourceMutatorWrapper(sdsCache)
+	sdsMutator := xds.NewAckingResourceMutatorWrapper(sdsCache, s.config.metrics)
 	sdsConfig := &xds.ResourceTypeConfiguration{
 		Source:      sdsCache,
 		AckObserver: sdsMutator,
 	}
 
 	npdsCache := xds.NewCache()
-	npdsMutator := xds.NewAckingResourceMutatorWrapper(npdsCache)
+	npdsMutator := xds.NewAckingResourceMutatorWrapper(npdsCache, s.config.metrics)
 	npdsConfig := &xds.ResourceTypeConfiguration{
 		Source:      npdsCache,
 		AckObserver: npdsMutator,
 	}
 
-	nphdsCache := newNPHDSCache(s.ipCache)
+	nphdsCache := newNPHDSCache(s.logger, s.ipCache)
 	nphdsConfig := &xds.ResourceTypeConfiguration{
 		Source:      nphdsCache,
 		AckObserver: &nphdsCache,
@@ -333,7 +342,10 @@ func (s *xdsServer) newSocketListener() (*net.UnixListener, error) {
 	}
 	// Change the group to ProxyGID allowing access from any process from that group.
 	if err = os.Chown(s.socketPath, -1, s.config.proxyGID); err != nil {
-		log.WithError(err).Warningf("Envoy: Failed to change the group of xDS listen socket at %s", s.socketPath)
+		s.logger.Warn("Envoy: Failed to change the group of xDS listen socket",
+			logfields.Path, s.socketPath,
+			logfields.Error, err,
+		)
 	}
 	return socketListener, nil
 }
@@ -369,9 +381,10 @@ func GetUpstreamCodecFilter() *envoy_config_http.HttpFilter {
 }
 
 func (s *xdsServer) getHttpFilterChainProto(clusterName string, tls bool, isIngress bool) *envoy_config_listener.FilterChain {
-	requestTimeout := int64(s.config.httpRequestTimeout) // seconds
-	idleTimeout := int64(s.config.httpIdleTimeout)       // seconds
-	maxGRPCTimeout := int64(s.config.httpMaxGRPCTimeout) // seconds
+	requestTimeout := int64(s.config.httpRequestTimeout)       // seconds
+	idleTimeout := int64(s.config.httpIdleTimeout)             // seconds
+	maxGRPCTimeout := int64(s.config.httpMaxGRPCTimeout)       // seconds
+	streamIdleTimeout := int64(s.config.httpStreamIdleTimeout) // seconds
 	numRetries := uint32(s.config.httpRetryCount)
 	retryTimeout := int64(s.config.httpRetryTimeout) // seconds
 	xffNumTrustedHops := s.config.proxyXffNumTrustedHopsEgress
@@ -397,7 +410,7 @@ func (s *xdsServer) getHttpFilterChainProto(clusterName string, tls bool, isIngr
 			UnixSockets: false,
 			CidrRanges:  GetInternalListenerCIDRs(option.Config.IPv4Enabled(), option.Config.IPv6Enabled()),
 		},
-		StreamIdleTimeout: &durationpb.Duration{}, // 0 == disabled
+		StreamIdleTimeout: &durationpb.Duration{Seconds: streamIdleTimeout}, // 0 == disabled
 		RouteSpecifier: &envoy_config_http.HttpConnectionManager_RouteConfig{
 			RouteConfig: &envoy_config_route.RouteConfiguration{
 				VirtualHosts: []*envoy_config_route.VirtualHost{{
@@ -635,7 +648,9 @@ func (s *xdsServer) AddAdminListener(port uint16, wg *completion.WaitGroup) {
 	if port == 0 {
 		return // 0 == disabled
 	}
-	log.WithField(logfields.Port, port).Debug("Envoy: AddAdminListener")
+	s.logger.Debug("Envoy: AddAdminListener",
+		logfields.Port, port,
+	)
 
 	s.addListener(adminListenerName, func() *envoy_config_listener.Listener {
 		hcmConfig := &envoy_config_http.HttpConnectionManager{
@@ -695,11 +710,16 @@ func (s *xdsServer) AddAdminListener(port uint16, wg *completion.WaitGroup) {
 		return listenerConf
 	}, wg, func(err error) {
 		if err != nil {
-			log.WithField(logfields.Port, port).WithError(err).Debug("Envoy: Adding admin listener failed")
+			s.logger.Debug("Envoy: Adding admin listener failed",
+				logfields.Port, port,
+				logfields.Error, err,
+			)
 			// Remove the added listener in case of a failure
 			s.removeListener(adminListenerName, nil, false)
 		} else {
-			log.WithField(logfields.Port, port).Info("Envoy: Listening for Admin API")
+			s.logger.Info("Envoy: Listening for Admin API",
+				logfields.Port, port,
+			)
 		}
 	}, false)
 }
@@ -730,7 +750,9 @@ func (s *xdsServer) AddMetricsListener(port uint16, wg *completion.WaitGroup) {
 	if port == 0 {
 		return // 0 == disabled
 	}
-	log.WithField(logfields.Port, port).Debug("Envoy: AddMetricsListener")
+	s.logger.Debug("Envoy: AddMetricsListener",
+		logfields.Port, port,
+	)
 
 	s.addListener(metricsListenerName, func() *envoy_config_listener.Listener {
 		hcmConfig := &envoy_config_http.HttpConnectionManager{
@@ -789,11 +811,16 @@ func (s *xdsServer) AddMetricsListener(port uint16, wg *completion.WaitGroup) {
 		return listenerConf
 	}, wg, func(err error) {
 		if err != nil {
-			log.WithField(logfields.Port, port).WithError(err).Debug("Envoy: Adding metrics listener failed")
+			s.logger.Debug("Envoy: Adding metrics listener failed",
+				logfields.Port, port,
+				logfields.Error, err,
+			)
 			// Remove the added listener in case of a failure
 			s.removeListener(metricsListenerName, nil, false)
 		} else {
-			log.WithField(logfields.Port, port).Info("Envoy: Listening for prometheus metrics")
+			s.logger.Info("Envoy: Listening for prometheus metrics",
+				logfields.Port, port,
+			)
 		}
 	}, false)
 }
@@ -820,7 +847,9 @@ func (s *xdsServer) addListener(name string, listenerConf func() *envoy_config_l
 		if isProxyListener {
 			s.proxyListeners++
 		}
-		log.WithField(logfields.Listener, name).Infof("Envoy: Upserting new listener")
+		s.logger.Info("Envoy: Upserting new listener",
+			logfields.Listener, name,
+		)
 	}
 	count++
 	s.listenerCount[name] = count
@@ -913,7 +942,6 @@ func getListenerFilter(isIngress bool, useOriginalSourceAddr bool, proxyPort uin
 		BpfRoot:                  bpf.BPFFSRoot(),
 		IsL7Lb:                   false,
 		ProxyId:                  uint32(proxyPort),
-		PolicyUpdateWarningLimit: durationpb.New(option.Config.FQDNProxyResponseMaxDelay),
 	}
 
 	return &envoy_config_listener.ListenerFilter{
@@ -981,7 +1009,11 @@ func (s *xdsServer) getListenerConf(name string, kind policy.L7ParserType, port 
 }
 
 func (s *xdsServer) AddListener(name string, kind policy.L7ParserType, port uint16, isIngress bool, mayUseOriginalSourceAddr bool, wg *completion.WaitGroup, cb func(err error)) error {
-	log.Debugf("Envoy: %s AddListener %s (mayUseOriginalSourceAddr: %v)", kind, name, mayUseOriginalSourceAddr)
+	s.logger.Debug("Envoy: AddListener",
+		logfields.L7ParserType, kind,
+		logfields.Listener, name,
+		logfields.MayUseOriginalSourceAddr, mayUseOriginalSourceAddr,
+	)
 
 	return s.addListener(name, func() *envoy_config_listener.Listener {
 		return s.getListenerConf(name, kind, port, isIngress, mayUseOriginalSourceAddr)
@@ -994,7 +1026,9 @@ func (s *xdsServer) RemoveListener(name string, wg *completion.WaitGroup) xds.Ac
 
 // removeListener removes an existing Envoy Listener.
 func (s *xdsServer) removeListener(name string, wg *completion.WaitGroup, isProxyListener bool) xds.AckingResourceMutatorRevertFunc {
-	log.Debugf("Envoy: RemoveListener %s", name)
+	s.logger.Debug("Envoy: RemoveListener",
+		logfields.Listener, name,
+	)
 
 	var listenerRevertFunc xds.AckingResourceMutatorRevertFunc
 
@@ -1007,14 +1041,18 @@ func (s *xdsServer) removeListener(name string, wg *completion.WaitGroup, isProx
 				s.proxyListeners--
 			}
 			delete(s.listenerCount, name)
-			log.WithField(logfields.Listener, name).Infof("Envoy: Deleting listener")
+			s.logger.Info("Envoy: Deleting listener",
+				logfields.Listener, name,
+			)
 			listenerRevertFunc = s.listenerMutator.Delete(ListenerTypeURL, name, []string{"127.0.0.1"}, wg, nil)
 		} else {
 			s.listenerCount[name] = count
 		}
 	} else {
 		// Bail out if this listener does not exist
-		log.Fatalf("Envoy: Attempt to remove non-existent listener: %s", name)
+		s.logger.Error("Envoy: Attempt to remove non-existent listener",
+			logfields.Listener, name,
+		)
 	}
 	s.mutex.Unlock()
 
@@ -1034,10 +1072,8 @@ func (s *xdsServer) removeListener(name string, wg *completion.WaitGroup, isProx
 func getL7Rules(l7Rules []api.PortRuleL7, l7Proto string) *cilium.L7NetworkPolicyRules {
 	allowRules := make([]*cilium.L7NetworkPolicyRule, 0, len(l7Rules))
 	denyRules := make([]*cilium.L7NetworkPolicyRule, 0, len(l7Rules))
-	useEnvoyMetadataMatcher := false
-	if strings.HasPrefix(l7Proto, "envoy.") {
-		useEnvoyMetadataMatcher = true
-	}
+	useEnvoyMetadataMatcher := strings.HasPrefix(l7Proto, "envoy.")
+
 	for _, l7 := range l7Rules {
 		if useEnvoyMetadataMatcher {
 			envoyFilterName := l7Proto
@@ -1102,9 +1138,7 @@ func getL7Rules(l7Rules []api.PortRuleL7, l7Proto string) *cilium.L7NetworkPolic
 		} else {
 			// proxylib go extension key/value policy
 			rule := &cilium.L7NetworkPolicyRule{Rule: make(map[string]string, len(l7))}
-			for k, v := range l7 {
-				rule.Rule[k] = v
-			}
+			maps.Copy(rule.Rule, l7)
 			allowRules = append(allowRules, rule)
 		}
 	}
@@ -1136,217 +1170,6 @@ func getKafkaL7Rules(l7Rules []kafka.PortRule) *cilium.KafkaNetworkPolicyRules {
 		rules.KafkaRules = allowRules
 	}
 	return rules
-}
-
-func getSecretString(secretManager certificatemanager.SecretManager, hdr *api.HeaderMatch, ns string) (string, error) {
-	value := ""
-	var err error
-	if hdr.Secret != nil {
-		if secretManager == nil {
-			err = fmt.Errorf("HeaderMatches: Nil secretManager")
-		} else {
-			value, err = secretManager.GetSecretString(context.TODO(), hdr.Secret, ns)
-		}
-	}
-	// Only use Value if secret was not obtained
-	if value == "" && hdr.Value != "" {
-		value = hdr.Value
-		if err != nil {
-			log.WithError(err).Debug("HeaderMatches: Using a default value due to k8s secret not being available")
-			err = nil
-		}
-	}
-
-	return value, err
-}
-
-func getHTTPRule(secretManager certificatemanager.SecretManager, h *api.PortRuleHTTP, ns string, policySecretsNamespace string) (*cilium.HttpNetworkPolicyRule, bool) {
-	// Count the number of header matches we need
-	cnt := len(h.Headers) + len(h.HeaderMatches)
-	if h.Path != "" {
-		cnt++
-	}
-	if h.Method != "" {
-		cnt++
-	}
-	if h.Host != "" {
-		cnt++
-	}
-
-	headers := make([]*envoy_config_route.HeaderMatcher, 0, cnt)
-	if h.Path != "" {
-		headers = append(headers, &envoy_config_route.HeaderMatcher{
-			Name: ":path",
-			HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-				StringMatch: &envoy_type_matcher.StringMatcher{
-					MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
-						SafeRegex: &envoy_type_matcher.RegexMatcher{
-							Regex: h.Path,
-						},
-					},
-				},
-			},
-		})
-	}
-	if h.Method != "" {
-		headers = append(headers, &envoy_config_route.HeaderMatcher{
-			Name: ":method",
-			HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-				StringMatch: &envoy_type_matcher.StringMatcher{
-					MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
-						SafeRegex: &envoy_type_matcher.RegexMatcher{
-							Regex: h.Method,
-						},
-					},
-				},
-			},
-		})
-	}
-	if h.Host != "" {
-		headers = append(headers, &envoy_config_route.HeaderMatcher{
-			Name: ":authority",
-			HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-				StringMatch: &envoy_type_matcher.StringMatcher{
-					MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
-						SafeRegex: &envoy_type_matcher.RegexMatcher{
-							Regex: h.Host,
-						},
-					},
-				},
-			},
-		})
-	}
-	for _, hdr := range h.Headers {
-		strs := strings.SplitN(hdr, " ", 2)
-		if len(strs) == 2 {
-			// Remove ':' in "X-Key: true"
-			key := strings.TrimRight(strs[0], ":")
-			// Header presence and matching (literal) value needed.
-			headers = append(headers, &envoy_config_route.HeaderMatcher{
-				Name: key,
-				HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-					StringMatch: &envoy_type_matcher.StringMatcher{
-						MatchPattern: &envoy_type_matcher.StringMatcher_Exact{
-							Exact: strs[1],
-						},
-					},
-				},
-			})
-		} else {
-			// Only header presence needed
-			headers = append(headers, &envoy_config_route.HeaderMatcher{
-				Name:                 strs[0],
-				HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_PresentMatch{PresentMatch: true},
-			})
-		}
-	}
-
-	headerMatches := make([]*cilium.HeaderMatch, 0, len(h.HeaderMatches))
-	for _, hdr := range h.HeaderMatches {
-		var mismatch_action cilium.HeaderMatch_MismatchAction
-		switch hdr.Mismatch {
-		case api.MismatchActionLog:
-			mismatch_action = cilium.HeaderMatch_CONTINUE_ON_MISMATCH
-		case api.MismatchActionAdd:
-			mismatch_action = cilium.HeaderMatch_ADD_ON_MISMATCH
-		case api.MismatchActionDelete:
-			mismatch_action = cilium.HeaderMatch_DELETE_ON_MISMATCH
-		case api.MismatchActionReplace:
-			mismatch_action = cilium.HeaderMatch_REPLACE_ON_MISMATCH
-		default:
-			mismatch_action = cilium.HeaderMatch_FAIL_ON_MISMATCH
-		}
-		// Fetch the secret
-		value, err := getSecretString(secretManager, hdr, ns)
-		if err != nil {
-			log.WithError(err).Warning("Failed fetching K8s Secret, header match will fail")
-			// Envoy treats an empty exact match value as matching ANY value; adding
-			// InvertMatch: true here will cause this rule to NEVER match.
-			headers = append(headers, &envoy_config_route.HeaderMatcher{
-				Name: hdr.Name,
-				HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-					StringMatch: &envoy_type_matcher.StringMatcher{
-						MatchPattern: &envoy_type_matcher.StringMatcher_Exact{
-							Exact: "",
-						},
-					},
-				},
-				InvertMatch: true,
-			})
-		} else if value != "" {
-			// Inline value provided.
-			// Header presence and matching (literal) value needed.
-			if mismatch_action == cilium.HeaderMatch_FAIL_ON_MISMATCH {
-				// fail on mismatch gets converted for regular HeaderMatcher
-				headers = append(headers, &envoy_config_route.HeaderMatcher{
-					Name: hdr.Name,
-					HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
-						StringMatch: &envoy_type_matcher.StringMatcher{
-							MatchPattern: &envoy_type_matcher.StringMatcher_Exact{
-								Exact: value,
-							},
-						},
-					},
-				})
-			} else {
-				log.Debugf("HeaderMatches: Adding %s", hdr.Name)
-				headerMatches = append(headerMatches, &cilium.HeaderMatch{
-					MismatchAction: mismatch_action,
-					Name:           hdr.Name,
-					Value:          value,
-				})
-			}
-		} else if hdr.Secret == nil {
-			// No inline value and no secret.
-			// Header presence for FAIL_ON_MISMSTCH or matching empty value otherwise needed.
-			if mismatch_action == cilium.HeaderMatch_FAIL_ON_MISMATCH {
-				// Only header presence needed
-				headers = append(headers, &envoy_config_route.HeaderMatcher{
-					Name:                 hdr.Name,
-					HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_PresentMatch{PresentMatch: true},
-				})
-			} else {
-				log.Debugf("HeaderMatches: Adding %s for an empty value", hdr.Name)
-				headerMatches = append(headerMatches, &cilium.HeaderMatch{
-					MismatchAction: mismatch_action,
-					Name:           hdr.Name,
-				})
-			}
-		} else {
-			// A secret is set, so we transform to an SDS value.
-			// cilium-envoy takes care of treating this as a presence match if the
-			// secret exists with an empty value.
-			log.Debugf("HeaderMatches: Adding %s because SDS value is required", hdr.Name)
-			headerMatches = append(headerMatches, &cilium.HeaderMatch{
-				MismatchAction: mismatch_action,
-				Name:           hdr.Name,
-				ValueSdsSecret: namespacedNametoSyncedSDSSecretName(types.NamespacedName{
-					Namespace: hdr.Secret.Namespace,
-					Name:      hdr.Secret.Name,
-				}, policySecretsNamespace),
-			})
-		}
-	}
-	if len(headers) == 0 {
-		headers = nil
-	} else {
-		SortHeaderMatchers(headers)
-	}
-	if len(headerMatches) == 0 {
-		headerMatches = nil
-	} else {
-		// Optimally we should sort the headerMatches to avoid
-		// updating the policy if only the order of the rules
-		// has changed. Right now, when 'headerMatches' is a
-		// slice (rather than a map) the order only changes if
-		// the order of the rules in the imported policies
-		// changes, so there is minimal likelihood of
-		// unnecessary policy updates.
-
-		// SortHeaderMatches(headerMatches)
-	}
-
-	return &cilium.HttpNetworkPolicyRule{Headers: headers, HeaderMatches: headerMatches}, len(headerMatches) == 0
 }
 
 var CiliumXDSConfigSource = &envoy_config_core.ConfigSource{
@@ -1452,31 +1275,7 @@ func namespacedNametoSyncedSDSSecretName(namespacedName types.NamespacedName, po
 	return fmt.Sprintf("%s/%s-%s", policySecretsNamespace, namespacedName.Namespace, namespacedName.Name)
 }
 
-func GetEnvoyHTTPRules(secretManager certificatemanager.SecretManager, l7Rules *api.L7Rules, ns string, policySecretsNamespace string) (*cilium.HttpNetworkPolicyRules, bool) {
-	if len(l7Rules.HTTP) > 0 { // Just cautious. This should never be false.
-		// Assume none of the rules have side-effects so that rule evaluation can
-		// be stopped as soon as the first allowing rule is found. 'canShortCircuit'
-		// is set to 'false' below if any rules with side effects are encountered,
-		// causing all the applicable rules to be evaluated instead.
-		canShortCircuit := true
-		httpRules := make([]*cilium.HttpNetworkPolicyRule, 0, len(l7Rules.HTTP))
-		for _, l7 := range l7Rules.HTTP {
-			var cs bool
-			rule, cs := getHTTPRule(secretManager, &l7, ns, policySecretsNamespace)
-			httpRules = append(httpRules, rule)
-			if !cs {
-				canShortCircuit = false
-			}
-		}
-		SortHTTPNetworkPolicyRules(httpRules)
-		return &cilium.HttpNetworkPolicyRules{
-			HttpRules: httpRules,
-		}, canShortCircuit
-	}
-	return nil, true
-}
-
-func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.CachedSelector, wildcard bool, l7Parser policy.L7ParserType, l7Rules *policy.PerSelectorPolicy, useFullTLSContext, useSDS bool, policySecretsNamespace string) (*cilium.PortNetworkPolicyRule, bool) {
+func (s *xdsServer) getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.CachedSelector, wildcard bool, l7Rules *policy.PerSelectorPolicy, useFullTLSContext, useSDS bool, policySecretsNamespace string) (*cilium.PortNetworkPolicyRule, bool) {
 	r := &cilium.PortNetworkPolicyRule{}
 
 	// Optimize the policy if the endpoint selector is a wildcard by
@@ -1530,7 +1329,7 @@ func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.Cache
 	// is set to 'false' below if any rules with side effects are encountered,
 	// causing all the applicable rules to be evaluated instead.
 	canShortCircuit := true
-	switch l7Parser {
+	switch l7Rules.L7Parser {
 	case policy.ParserTypeHTTP:
 		// 'r.L7' is an interface which must not be set to a typed 'nil',
 		// so check if we have any rules
@@ -1541,7 +1340,7 @@ func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.Cache
 				httpRules = l7Rules.EnvoyHTTPRules
 				canShortCircuit = l7Rules.CanShortCircuit
 			} else {
-				httpRules, canShortCircuit = GetEnvoyHTTPRules(nil, &l7Rules.L7Rules, "", policySecretsNamespace)
+				httpRules, canShortCircuit = s.l7RulesTranslator.GetEnvoyHTTPRules(&l7Rules.L7Rules, "")
 			}
 			r.L7 = &cilium.PortNetworkPolicyRule_HttpRules{
 				HttpRules: httpRules,
@@ -1552,7 +1351,7 @@ func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.Cache
 		// Kafka is implemented as an Envoy Go Extension
 		if len(l7Rules.Kafka) > 0 {
 			// L7 rules are not sorted
-			r.L7Proto = l7Parser.String()
+			r.L7Proto = l7Rules.L7Parser.String()
 			r.L7 = &cilium.PortNetworkPolicyRule_KafkaRules{
 				KafkaRules: getKafkaL7Rules(l7Rules.Kafka),
 			}
@@ -1565,7 +1364,7 @@ func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.Cache
 		// Assume unknown parser types use a Key-Value Pair policy
 		if len(l7Rules.L7) > 0 {
 			// L7 rules are not sorted
-			r.L7Proto = l7Parser.String()
+			r.L7Proto = l7Rules.L7Parser.String()
 			r.L7 = &cilium.PortNetworkPolicyRule_L7Rules{
 				L7Rules: getL7Rules(l7Rules.L7, r.L7Proto),
 			}
@@ -1577,7 +1376,7 @@ func getPortNetworkPolicyRule(version *versioned.VersionHandle, sel policy.Cache
 
 // getWildcardNetworkPolicyRule returns the rule for port 0, which
 // will be considered after port-specific rules.
-func getWildcardNetworkPolicyRule(version *versioned.VersionHandle, selectors policy.L7DataMap) *cilium.PortNetworkPolicyRule {
+func (s *xdsServer) getWildcardNetworkPolicyRule(version *versioned.VersionHandle, selectors policy.L7DataMap) *cilium.PortNetworkPolicyRule {
 	// selections are pre-sorted, so sorting is only needed if merging selections from multiple selectors
 	if len(selectors) == 1 {
 		for sel := range selectors {
@@ -1609,7 +1408,7 @@ func getWildcardNetworkPolicyRule(version *versioned.VersionHandle, selectors po
 			// Issue a warning if this port-0 rule is a redirect.
 			// Deny rules don't support L7 therefore for the deny case
 			// l7.IsRedirect() will always return false.
-			log.Warningf("L3-only rule for selector %v surprisingly requires proxy redirection (%v)!", sel, *l7)
+			s.logger.Warn("L3-only rule for selector surprisingly requires proxy redirection!", logfields.Selector, sel)
 		}
 
 		selections := sel.GetSelections(version)
@@ -1642,7 +1441,7 @@ func getWildcardNetworkPolicyRule(version *versioned.VersionHandle, selectors po
 	}
 }
 
-func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4PolicyMap, policyEnforced bool, useFullTLSContext, useSDS bool, dir string, policySecretsNamespace string) []*cilium.PortNetworkPolicy {
+func (s *xdsServer) getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4PolicyMap, policyEnforced bool, useFullTLSContext, useSDS bool, dir string, policySecretsNamespace string) []*cilium.PortNetworkPolicy {
 	// TODO: integrate visibility with enforced policy
 	if !policyEnforced {
 		// Always allow all ports
@@ -1686,15 +1485,15 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 		if port == 0 {
 			// L3-only rule, must generate L7 allow-all in case there are other
 			// port-specific rules. Otherwise traffic from allowed remotes could be dropped.
-			rule := getWildcardNetworkPolicyRule(version, l4.PerSelectorPolicies)
+			rule := s.getWildcardNetworkPolicyRule(version, l4.PerSelectorPolicies)
 			if rule != nil {
-				log.WithFields(logrus.Fields{
-					logfields.EndpointID:       ep.GetID(),
-					logfields.Version:          version,
-					logfields.TrafficDirection: dir,
-					logfields.Port:             port,
-					logfields.PolicyID:         rule.RemotePolicies,
-				}).Debug("Wildcard PortNetworkPolicyRule matching remote IDs")
+				s.logger.Debug("Wildcard PortNetworkPolicyRule matching remote IDs",
+					logfields.EndpointID, ep.GetID(),
+					logfields.Version, version,
+					logfields.TrafficDirection, dir,
+					logfields.Port, port,
+					logfields.PolicyID, rule.RemotePolicies,
+				)
 
 				if len(rule.RemotePolicies) == 0 {
 					// Got an allow-all rule, which can short-circuit all of
@@ -1711,20 +1510,20 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 				// then the proxy may need to drop some allowed l3 due to l7 rules potentially
 				// being different between the selectors.
 				wildcard := nSelectors == 1 || sel.IsWildcard()
-				rule, cs := getPortNetworkPolicyRule(version, sel, wildcard, l4.L7Parser, l7, useFullTLSContext, useSDS, policySecretsNamespace)
+				rule, cs := s.getPortNetworkPolicyRule(version, sel, wildcard, l7, useFullTLSContext, useSDS, policySecretsNamespace)
 				if rule != nil {
 					if !cs {
 						canShortCircuit = false
 					}
 
-					log.WithFields(logrus.Fields{
-						logfields.EndpointID:       ep.GetID(),
-						logfields.Version:          version,
-						logfields.TrafficDirection: dir,
-						logfields.Port:             port,
-						logfields.PolicyID:         rule.RemotePolicies,
-						logfields.ServerNames:      rule.ServerNames,
-					}).Debug("PortNetworkPolicyRule matching remote IDs")
+					s.logger.Debug("PortNetworkPolicyRule matching remote IDs",
+						logfields.EndpointID, ep.GetID(),
+						logfields.Version, version,
+						logfields.TrafficDirection, dir,
+						logfields.Port, port,
+						logfields.PolicyID, rule.RemotePolicies,
+						logfields.ServerNames, rule.ServerNames,
+					)
 
 					if len(rule.RemotePolicies) == 0 && rule.L7 == nil && rule.DownstreamTlsContext == nil && rule.UpstreamTlsContext == nil && len(rule.ServerNames) == 0 {
 						// Got an allow-all rule, which can short-circuit all of
@@ -1737,11 +1536,11 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 		}
 		// Short-circuit rules if a rule allows all and all other rules can be short-circuited
 		if allowAll && canShortCircuit {
-			log.WithFields(logrus.Fields{
-				logfields.EndpointID:       ep.GetID(),
-				logfields.TrafficDirection: dir,
-				logfields.Port:             port,
-			}).Debug("Short circuiting HTTP rules due to rule allowing all and no other rules needing attention")
+			s.logger.Debug("Short circuiting HTTP rules due to rule allowing all and no other rules needing attention",
+				logfields.EndpointID, ep.GetID(),
+				logfields.TrafficDirection, dir,
+				logfields.Port, port,
+			)
 			rules = nil
 		}
 
@@ -1750,11 +1549,11 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 		// In this case, just don't generate any PortNetworkPolicy for this
 		// port.
 		if !allowAll && len(rules) == 0 {
-			log.WithFields(logrus.Fields{
-				logfields.EndpointID:       ep.GetID(),
-				logfields.TrafficDirection: dir,
-				logfields.Port:             port,
-			}).Debug("Skipping PortNetworkPolicy due to no matching remote identities")
+			s.logger.Debug("Skipping PortNetworkPolicy due to no matching remote identities",
+				logfields.EndpointID, ep.GetID(),
+				logfields.TrafficDirection, dir,
+				logfields.Port, port,
+			)
 			return true
 		}
 
@@ -1763,7 +1562,7 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 			Port:     uint32(port),
 			EndPort:  uint32(l4.EndPort),
 			Protocol: protocol,
-			Rules:    SortPortNetworkPolicyRules(rules),
+			Rules:    envoypolicy.SortPortNetworkPolicyRules(rules),
 		})
 		return true
 	})
@@ -1772,11 +1571,11 @@ func getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4Po
 		return nil
 	}
 
-	return SortPortNetworkPolicies(PerPortPolicies)
+	return envoypolicy.SortPortNetworkPolicies(PerPortPolicies)
 }
 
 // getNetworkPolicy converts a network policy into a cilium.NetworkPolicy.
-func getNetworkPolicy(ep endpoint.EndpointUpdater, ips []string, l4Policy *policy.L4Policy,
+func (s *xdsServer) getNetworkPolicy(ep endpoint.EndpointUpdater, ips []string, l4Policy *policy.L4Policy,
 	ingressPolicyEnforced, egressPolicyEnforced, useFullTLSContext, useSDS bool, policySecretsNamespace string,
 ) *cilium.NetworkPolicy {
 	p := &cilium.NetworkPolicy{
@@ -1791,8 +1590,8 @@ func getNetworkPolicy(ep endpoint.EndpointUpdater, ips []string, l4Policy *polic
 		ingressMap = l4Policy.Ingress.PortRules
 		egressMap = l4Policy.Egress.PortRules
 	}
-	p.IngressPerPortPolicies = getDirectionNetworkPolicy(ep, ingressMap, ingressPolicyEnforced, useFullTLSContext, useSDS, "ingress", policySecretsNamespace)
-	p.EgressPerPortPolicies = getDirectionNetworkPolicy(ep, egressMap, egressPolicyEnforced, useFullTLSContext, useSDS, "egress", policySecretsNamespace)
+	p.IngressPerPortPolicies = s.getDirectionNetworkPolicy(ep, ingressMap, ingressPolicyEnforced, useFullTLSContext, useSDS, "ingress", policySecretsNamespace)
+	p.EgressPerPortPolicies = s.getDirectionNetworkPolicy(ep, egressMap, egressPolicyEnforced, useFullTLSContext, useSDS, "egress", policySecretsNamespace)
 
 	return p
 }
@@ -1850,11 +1649,13 @@ func (s *xdsServer) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, policy *pol
 		//
 		// TODO: When L7 policy support for the host is needed, all host IPs should be
 		// considered here?
-		log.WithField(logfields.EndpointID, ep.GetID()).Debug("Endpoint has no IP addresses")
+		s.logger.Debug("Endpoint has no IP addresses",
+			logfields.EndpointID, ep.GetID(),
+		)
 		return nil, func() error { return nil }
 	}
 
-	networkPolicy := getNetworkPolicy(ep, ips, policy, ingressPolicyEnforced, egressPolicyEnforced, s.config.useFullTLSContext, s.config.useSDS, s.secretManager.GetSecretSyncNamespace())
+	networkPolicy := s.getNetworkPolicy(ep, ips, policy, ingressPolicyEnforced, egressPolicyEnforced, s.config.useFullTLSContext, s.config.useSDS, s.secretManager.GetSecretSyncNamespace())
 
 	// First, validate the policy
 	err := networkPolicy.Validate()
@@ -1890,7 +1691,7 @@ func (s *xdsServer) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, policy *pol
 	}
 
 	return nil, func() error {
-		log.Debug("Reverting xDS network policy update")
+		s.logger.Debug("Reverting xDS network policy update")
 
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
@@ -1907,7 +1708,7 @@ func (s *xdsServer) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, policy *pol
 		// This is best-effort.
 		revertFunc(nil)
 
-		log.Debug("Finished reverting xDS network policy update")
+		s.logger.Debug("Finished reverting xDS network policy update")
 
 		return nil
 	}
@@ -1961,7 +1762,7 @@ type Resources struct {
 	Endpoints []*envoy_config_endpoint.ClusterLoadAssignment
 
 	// Callback functions that are called if the corresponding Listener change was successfully acked by Envoy
-	PortAllocationCallbacks map[string]func(context.Context) error `json:"-"`
+	PortAllocationCallbacks map[string]func(context.Context) error `json:"-" yaml:"-"`
 }
 
 // ListenersAddedOrDeleted returns 'true' if a listener is added or removed when updating from 'old'
@@ -2020,7 +1821,9 @@ func (s *xdsServer) UpsertEnvoyResources(ctx context.Context, resources Resource
 			msg += fmt.Sprintf("%s%d secrets", sep, len(resources.Secrets))
 		}
 
-		log.Debugf("UpsertEnvoyResources: Upserting %s...", msg)
+		s.logger.Debug("UpsertEnvoyResources: Upserting Envoy resources",
+			logfields.Resource, msg,
+		)
 	}
 	var wg *completion.WaitGroup
 	// Listener config may fail if it refers to a cluster that has not been added yet, so we
@@ -2040,32 +1843,46 @@ func (s *xdsServer) UpsertEnvoyResources(ctx context.Context, resources Resource
 	// resources to begin with.
 	// If both listeners and clusters are added then wait for clusters.
 	for _, r := range resources.Secrets {
-		log.Debugf("Envoy upsertSecret %s", r.Name)
+		s.logger.Debug("Envoy upsertSecret",
+			logfields.ResourceName, r.Name,
+		)
 		revertFuncs = append(revertFuncs, s.upsertSecret(r.Name, r, nil))
 	}
 	for _, r := range resources.Endpoints {
-		log.Debugf("Envoy upsertEndpoint %s %v", r.ClusterName, r)
+		s.logger.Debug("Envoy upsertEndpoint",
+			logfields.ResourceName, r.ClusterName,
+			logfields.Resource, r,
+		)
 		revertFuncs = append(revertFuncs, s.upsertEndpoint(r.ClusterName, r, nil))
 	}
 	for _, r := range resources.Clusters {
-		log.Debugf("Envoy upsertCluster %s %v", r.Name, r)
+		s.logger.Debug("Envoy upsertCluster",
+			logfields.ResourceName, r.Name,
+			logfields.Resource, r,
+		)
 		revertFuncs = append(revertFuncs, s.upsertCluster(r.Name, r, wg))
 	}
 	for _, r := range resources.Routes {
-		log.Debugf("Envoy upsertRoute %s %v", r.Name, r)
+		s.logger.Debug("Envoy upsertRoute",
+			logfields.ResourceName, r.Name,
+			logfields.Resource, r,
+		)
 		revertFuncs = append(revertFuncs, s.upsertRoute(r.Name, r, nil))
 	}
 	// Wait before new Listeners are added if clusters were also added above.
 	if wg != nil {
 		start := time.Now()
-		log.Debug("UpsertEnvoyResources: Waiting for cluster updates to complete...")
+		s.logger.Debug("UpsertEnvoyResources: Waiting for cluster updates to complete...")
 		err := wg.Wait()
-		log.Debugf("UpsertEnvoyResources: Wait time for cluster updates %v (err: %s)", time.Since(start), err)
+		s.logger.Debug("UpsertEnvoyResources: Wait time for cluster updates",
+			logfields.Duration, time.Since(start),
+			logfields.Error, err,
+		)
 
 		// revert all changes in case of failure
 		if err != nil {
 			revertFuncs.Revert(nil)
-			log.Debug("UpsertEnvoyResources: Finished reverting failed xDS transactions")
+			s.logger.Debug("UpsertEnvoyResources: Finished reverting failed xDS transactions")
 			return err
 		}
 		wg = nil
@@ -2076,28 +1893,36 @@ func (s *xdsServer) UpsertEnvoyResources(ctx context.Context, resources Resource
 		wg = completion.NewWaitGroup(ctx)
 	}
 	for _, r := range resources.Listeners {
-		log.Debugf("Envoy upsertListener %s %v", r.Name, r)
+		s.logger.Debug("Envoy upsertListener",
+			logfields.ResourceName, r.Name,
+			logfields.Resource, r,
+		)
 		listenerName := r.Name
 		revertFuncs = append(revertFuncs, s.upsertListener(r.Name, r, wg,
 			// this callback is not called if there is no change
 			func(err error) {
 				if err == nil && resources.PortAllocationCallbacks[listenerName] != nil {
 					if callbackErr := resources.PortAllocationCallbacks[listenerName](ctx); callbackErr != nil {
-						log.WithError(callbackErr).Warn("Failure in port allocation callback")
+						s.logger.Warn("Failure in port allocation callback",
+							logfields.Error, callbackErr,
+						)
 					}
 				}
 			}))
 	}
 	if wg != nil {
 		start := time.Now()
-		log.Debug("UpsertEnvoyResources: Waiting for proxy updates to complete...")
+		s.logger.Debug("UpsertEnvoyResources: Waiting for proxy updates to complete...")
 		err := wg.Wait()
-		log.Debugf("UpsertEnvoyResources: Wait time for proxy updates %v (err: %s)", time.Since(start), err)
+		s.logger.Debug("UpsertEnvoyResources: Wait time for proxy updates",
+			logfields.Duration, time.Since(start),
+			logfields.Error, err,
+		)
 
 		// revert all changes in case of failure
 		if err != nil {
 			revertFuncs.Revert(nil)
-			log.Debug("UpsertEnvoyResources: Finished reverting failed xDS transactions")
+			s.logger.Debug("UpsertEnvoyResources: Finished reverting failed xDS transactions")
 		}
 		return err
 	}
@@ -2124,7 +1949,11 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 		for _, newListener := range new.Listeners {
 			if newListener.Name == oldListener.Name {
 				if addr := newListener.Address.GetSocketAddress(); addr != nil && addr.GetPortValue() != port {
-					log.Debugf("UpdateEnvoyResources: %s port changing from %d to %d...", newListener.Name, port, addr.GetPortValue())
+					s.logger.Debug("UpdateEnvoyResources: port changing",
+						logfields.Listener, newListener.Name,
+						logfields.ValueBefore, port,
+						logfields.ValueAfter, addr.GetPortValue(),
+					)
 					waitForDelete = true
 				} else {
 					// port is not changing, remove from new.PortAllocations to prevent acking an already acked port.
@@ -2138,14 +1967,18 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			deleteListeners = append(deleteListeners, oldListener)
 		}
 	}
-	log.Debugf("UpdateEnvoyResources: Deleting %d, Upserting %d listeners...", len(deleteListeners), len(new.Listeners))
+	s.logger.Debug("UpdateEnvoyResources: listeners",
+		logfields.ResourcesDeleted, len(deleteListeners),
+		logfields.ResourcesUpserted, len(new.Listeners),
+	)
 	for _, listener := range deleteListeners {
 		listenerName := listener.Name
 		revertFuncs = append(revertFuncs, s.deleteListener(listener.Name, wg,
 			func(err error) {
 				if err == nil && old.PortAllocationCallbacks[listenerName] != nil {
 					if callbackErr := old.PortAllocationCallbacks[listenerName](ctx); callbackErr != nil {
-						log.WithError(callbackErr).Warn("Failure in port allocation callback")
+						s.logger.Warn("Failure in port allocation callback",
+							logfields.Error, callbackErr)
 					}
 				}
 			}))
@@ -2172,7 +2005,10 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			deleteRoutes = append(deleteRoutes, oldRoute)
 		}
 	}
-	log.Debugf("UpdateEnvoyResources: Deleting %d, Upserting %d routes...", len(deleteRoutes), len(new.Routes))
+	s.logger.Debug("UpdateEnvoyResources: routes",
+		logfields.ResourcesDeleted, len(deleteRoutes),
+		logfields.ResourcesUpserted, len(new.Routes),
+	)
 	for _, route := range deleteRoutes {
 		revertFuncs = append(revertFuncs, s.deleteRoute(route.Name, nil))
 	}
@@ -2190,7 +2026,10 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			deleteClusters = append(deleteClusters, oldCluster)
 		}
 	}
-	log.Debugf("UpdateEnvoyResources: Deleting %d, Upserting %d clusters...", len(deleteClusters), len(new.Clusters))
+	s.logger.Debug("UpdateEnvoyResources: clusters",
+		logfields.ResourcesDeleted, len(deleteClusters),
+		logfields.ResourcesUpserted, len(new.Clusters),
+	)
 	for _, cluster := range deleteClusters {
 		revertFuncs = append(revertFuncs, s.deleteCluster(cluster.Name, nil))
 	}
@@ -2208,7 +2047,10 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			deleteEndpoints = append(deleteEndpoints, oldEndpoint)
 		}
 	}
-	log.Debugf("UpdateEnvoyResources: Deleting %d, Upserting %d endpoints...", len(deleteEndpoints), len(new.Endpoints))
+	s.logger.Debug("UpdateEnvoyResources: endpoints",
+		logfields.ResourcesDeleted, len(deleteEndpoints),
+		logfields.ResourcesUpserted, len(new.Endpoints),
+	)
 	for _, endpoint := range deleteEndpoints {
 		revertFuncs = append(revertFuncs, s.deleteEndpoint(endpoint.ClusterName, nil))
 	}
@@ -2226,7 +2068,10 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			deleteSecrets = append(deleteSecrets, oldSecret)
 		}
 	}
-	log.Debugf("UpdateEnvoyResources: Deleting %d, Upserting %d secrets...", len(deleteSecrets), len(new.Secrets))
+	s.logger.Debug("UpdateEnvoyResources: secrets",
+		logfields.ResourcesDeleted, len(deleteSecrets),
+		logfields.ResourcesUpserted, len(new.Secrets),
+	)
 	for _, secret := range deleteSecrets {
 		revertFuncs = append(revertFuncs, s.deleteSecret(secret.Name, nil))
 	}
@@ -2234,12 +2079,16 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 	// Have to wait for deletes to complete before adding new listeners if a listener's port number is changed.
 	if wg != nil && waitForDelete {
 		start := time.Now()
-		log.Debug("UpdateEnvoyResources: Waiting for proxy deletes to complete...")
+		s.logger.Debug("UpdateEnvoyResources: Waiting for proxy deletes to complete...")
 		err := wg.Wait()
 		if err != nil {
-			log.Debug("UpdateEnvoyResources: delete failed: ", err)
+			s.logger.Debug("UpdateEnvoyResources: delete failed",
+				logfields.Error, err,
+			)
 		}
-		log.Debug("UpdateEnvoyResources: Wait time for proxy deletes: ", time.Since(start))
+		s.logger.Debug("UpdateEnvoyResources: Finished waiting for proxy deletes",
+			logfields.Duration, time.Since(start),
+		)
 		// new wait group for adds
 		wg = completion.NewWaitGroup(ctx)
 	}
@@ -2262,12 +2111,16 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 	}
 	if wg != nil && len(new.Clusters) > 0 {
 		start := time.Now()
-		log.Debug("UpdateEnvoyResources: Waiting for cluster updates to complete...")
+		s.logger.Debug("UpdateEnvoyResources: Waiting for cluster updates to complete...")
 		err := wg.Wait()
 		if err != nil {
-			log.Debug("UpdateEnvoyResources: cluster update failed: ", err)
+			s.logger.Debug("UpdateEnvoyResources: cluster update failed",
+				logfields.Error, err,
+			)
 		}
-		log.Debug("UpdateEnvoyResources: Wait time for cluster updates: ", time.Since(start))
+		s.logger.Debug("UpdateEnvoyResources: Finished waiting for cluster updates",
+			logfields.Duration, time.Since(start),
+		)
 		// new wait group for adds
 		wg = completion.NewWaitGroup(ctx)
 	}
@@ -2279,7 +2132,9 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 			func(err error) {
 				if err == nil && new.PortAllocationCallbacks[listenerName] != nil {
 					if callbackErr := new.PortAllocationCallbacks[listenerName](ctx); callbackErr != nil {
-						log.WithError(callbackErr).Warn("Failure in port allocation callback")
+						s.logger.Warn("Failure in port allocation callback",
+							logfields.Error, callbackErr,
+						)
 					}
 				}
 			}))
@@ -2287,14 +2142,17 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 
 	if wg != nil {
 		start := time.Now()
-		log.Debug("UpdateEnvoyResources: Waiting for proxy updates to complete...")
+		s.logger.Debug("UpdateEnvoyResources: Waiting for proxy updates to complete...")
 		err := wg.Wait()
-		log.Debugf("UpdateEnvoyResources: Wait time for proxy updates %v (err: %s)", time.Since(start), err)
+		s.logger.Debug("UpdateEnvoyResources: Finished waiting for proxy updates",
+			logfields.Duration, time.Since(start),
+			logfields.Error, err,
+		)
 
 		// revert all changes in case of failure
 		if err != nil {
 			revertFuncs.Revert(nil)
-			log.Debug("UpdateEnvoyResources: Finished reverting failed xDS transactions")
+			s.logger.Debug("UpdateEnvoyResources: Finished reverting failed xDS transactions")
 		}
 		return err
 	}
@@ -2302,8 +2160,13 @@ func (s *xdsServer) UpdateEnvoyResources(ctx context.Context, old, new Resources
 }
 
 func (s *xdsServer) DeleteEnvoyResources(ctx context.Context, resources Resources) error {
-	log.Debugf("DeleteEnvoyResources: Deleting %d listeners, %d routes, %d clusters, %d endpoints, and %d secrets...",
-		len(resources.Listeners), len(resources.Routes), len(resources.Clusters), len(resources.Endpoints), len(resources.Secrets))
+	s.logger.Debug("DeleteEnvoyResources: Deleting Envoy resources",
+		logfields.ResourceListeners, len(resources.Listeners),
+		logfields.ResourceRoutes, len(resources.Routes),
+		logfields.ResourceClusters, len(resources.Clusters),
+		logfields.ResourceEndpoints, len(resources.Endpoints),
+		logfields.ResourceSecrets, len(resources.Secrets),
+	)
 	var wg *completion.WaitGroup
 	var revertFuncs xds.AckingResourceMutatorRevertFuncList
 	// Wait only if new Listeners are added, as they will always be acked.
@@ -2317,7 +2180,9 @@ func (s *xdsServer) DeleteEnvoyResources(ctx context.Context, resources Resource
 			func(err error) {
 				if err == nil && resources.PortAllocationCallbacks[listenerName] != nil {
 					if callbackErr := resources.PortAllocationCallbacks[listenerName](ctx); callbackErr != nil {
-						log.WithError(callbackErr).Warn("Failure in port allocation callback")
+						s.logger.Warn("Failure in port allocation callback",
+							logfields.Error, callbackErr,
+						)
 					}
 				}
 			}))
@@ -2345,14 +2210,17 @@ func (s *xdsServer) DeleteEnvoyResources(ctx context.Context, resources Resource
 
 	if wg != nil {
 		start := time.Now()
-		log.Debug("DeleteEnvoyResources: Waiting for proxy updates to complete...")
+		s.logger.Debug("DeleteEnvoyResources: Waiting for proxy updates to complete...")
 		err := wg.Wait()
-		log.Debugf("DeleteEnvoyResources: Wait time for proxy updates %v (err: %s)", time.Since(start), err)
+		s.logger.Debug("DeleteEnvoyResources: Finished waiting for proxy updates",
+			logfields.Duration, time.Since(start),
+			logfields.Error, err,
+		)
 
 		// revert all changes in case of failure
 		if err != nil {
 			revertFuncs.Revert(nil)
-			log.Debug("DeleteEnvoyResources: Finished reverting failed xDS transactions")
+			s.logger.Debug("DeleteEnvoyResources: Finished reverting failed xDS transactions")
 		}
 		return err
 	}

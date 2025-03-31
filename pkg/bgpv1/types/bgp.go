@@ -21,8 +21,12 @@ const (
 	LabelNeighborAsn   = "neighbor_asn"
 	LabelAfi           = "afi"
 	LabelSafi          = "safi"
+	LabelResourceKind  = "resource_kind"
+	LabelResourceName  = "resource_name"
 
-	MetricsSubsystem = "bgp_control_plane"
+	MetricsSubsystem                  = "bgp_control_plane"
+	MetricReconcileErrorsTotal        = "reconcile_errors_total"
+	MetricReconcileRunDurationSeconds = "reconcile_run_duration_seconds"
 )
 
 // BGPGlobal contains high level BGP configuration for given instance.
@@ -196,6 +200,19 @@ type RoutePolicyActions struct {
 	// SetLocalPreference define a BGP local preference value to be set on the matched route.
 	// If nil, no local preference is set.
 	SetLocalPreference *int64
+	// NextHop sets (or doesn't set) a next hop value on the matched route.
+	NextHop *RoutePolicyActionNextHop
+}
+
+// RoutingPolicyActionNextHop defines the action taken on the next hop of a
+// route matched by a routing policy.
+//
+// +deepequal-gen=true
+type RoutePolicyActionNextHop struct {
+	// Set nexthop to the self address of the router
+	Self bool
+	// Don't change the nexthop of the route
+	Unchanged bool
 }
 
 // RoutePolicyStatement represents a single statement of a routing RoutePolicy. It contains conditions for

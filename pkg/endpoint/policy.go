@@ -136,7 +136,7 @@ func (res *policyGenerateResult) release() {
 		res.endpointPolicy.Ready()
 		// Detach the EndpointPolicy from the SelectorPolicy it was
 		// instantiated from
-		res.endpointPolicy.Detach()
+		res.endpointPolicy.Detach(logging.DefaultSlogLogger)
 		res.endpointPolicy = nil
 	}
 }
@@ -216,7 +216,7 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 	}
 
 	var selectorPolicy policy.SelectorPolicy
-	selectorPolicy, result.policyRevision, err = e.policyGetter.GetPolicyRepository().GetSelectorPolicy(securityIdentity, skipPolicyRevision, stats)
+	selectorPolicy, result.policyRevision, err = e.policyRepo.GetSelectorPolicy(securityIdentity, skipPolicyRevision, stats, e.GetID())
 	if err != nil {
 		e.getLogger().WithError(err).Warning("Failed to calculate SelectorPolicy")
 		return err
@@ -264,7 +264,7 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 
 	// DistillPolicy converts a SelectorPolicy in to an EndpointPolicy
 	stats.endpointPolicyCalculation.Start()
-	result.endpointPolicy = selectorPolicy.DistillPolicy(e, desiredRedirects)
+	result.endpointPolicy = selectorPolicy.DistillPolicy(logging.DefaultSlogLogger, e, desiredRedirects)
 	stats.endpointPolicyCalculation.End(true)
 
 	datapathRegenCtxt.policyResult = result
@@ -319,7 +319,7 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 			// Mark as "ready" so that Detach will not complain about it
 			e.desiredPolicy.Ready()
 			// Detach the EndpointPolicy from the SelectorPolicy it was instantiated from
-			e.desiredPolicy.Detach()
+			e.desiredPolicy.Detach(logging.DefaultSlogLogger)
 		}
 
 		e.desiredPolicy = res.endpointPolicy
@@ -330,10 +330,10 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 		datapathRegenCtxt.revertStack.Push(func() error {
 			// Do nothing if e.policyMap was not initialized already
 			if e.policyMap != nil && e.desiredPolicy != e.realizedPolicy {
-				e.desiredPolicy.Detach()
+				e.desiredPolicy.Detach(logging.DefaultSlogLogger)
 				e.desiredPolicy = e.realizedPolicy
 
-				currentMap, err := e.dumpPolicyMapToMapStateMap()
+				currentMap, err := e.policyMap.DumpToMapStateMap()
 				if err != nil {
 					return fmt.Errorf("unable to dump PolicyMap when trying to revert failed endpoint regeneration: %w", err)
 				}
@@ -540,7 +540,7 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 
 	if e.desiredPolicy != e.realizedPolicy {
 		// Remove references to the old policy
-		e.realizedPolicy.Detach()
+		e.realizedPolicy.Detach(logging.DefaultSlogLogger)
 		// Set realized state to desired state.
 		e.realizedPolicy = e.desiredPolicy
 	}
@@ -550,7 +550,7 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 	e.setPolicyRevision(revision)
 
 	// Remove restored rules after successful regeneration
-	e.owner.RemoveRestoredDNSRules(e.ID)
+	e.dnsRulesApi.RemoveRestoredDNSRules(e.ID)
 
 	return nil
 }
@@ -929,9 +929,11 @@ func (e *Endpoint) startRegenerationFailureHandler() {
 }
 
 func (e *Endpoint) notifyEndpointRegeneration(err error) {
-	reprerr := e.owner.SendNotification(monitorAPI.EndpointRegenMessage(e, err))
-	if reprerr != nil {
-		e.getLogger().WithError(reprerr).Warn("Notifying monitor about endpoint regeneration failed")
+	if !option.Config.DryMode {
+		reprerr := e.monitorAgent.SendEvent(monitorAPI.MessageTypeAgent, monitorAPI.EndpointRegenMessage(e, err))
+		if reprerr != nil {
+			e.getLogger().WithError(reprerr).Warn("Notifying monitor about endpoint regeneration failed")
+		}
 	}
 }
 
@@ -946,7 +948,7 @@ func (e *Endpoint) FormatGlobalEndpointID() string {
 // This synchronizes the key-value store with a mapping of the endpoint's IP
 // with the numerical ID representing its security identity.
 func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
-	if option.Config.KVStore == "" || !endpointIP.IsValid() || option.Config.JoinCluster {
+	if option.Config.KVStore == "" || !endpointIP.IsValid() {
 		return
 	}
 
@@ -1023,9 +1025,9 @@ func (e *Endpoint) SetIdentity(identity *identityPkg.Identity, newEndpoint bool)
 	// identity for the endpoint.
 	if newEndpoint {
 		// TODO - GH-9354.
-		e.owner.AddIdentity(identity)
+		e.identityManager.Add(identity)
 	} else {
-		e.owner.RemoveOldAddNewIdentity(e.SecurityIdentity, identity)
+		e.identityManager.RemoveOldAddNew(e.SecurityIdentity, identity)
 	}
 	e.SecurityIdentity = identity
 	e.replaceIdentityLabels(labels.LabelSourceAny, identity.Labels)
@@ -1071,14 +1073,15 @@ func (e *Endpoint) UpdateNoTrackRules(noTrackPort string) {
 	}
 }
 
-// UpdateBandwidthPolicy updates the egress bandwidth of this endpoint to
+// UpdateBandwidthPolicy updates the egress/ingress bandwidth of this endpoint to
 // progagate the throttle rate to the BPF data path.
-func (e *Endpoint) UpdateBandwidthPolicy(bwm dptypes.BandwidthManager, bandwidthEgress, priority string) {
+func (e *Endpoint) UpdateBandwidthPolicy(bwm dptypes.BandwidthManager, bandwidthEgress, bandwidthIngress, priority string) {
 	ch, err := e.eventQueue.Enqueue(eventqueue.NewEvent(&EndpointPolicyBandwidthEvent{
-		bwm:             bwm,
-		ep:              e,
-		bandwidthEgress: bandwidthEgress,
-		priority:        priority,
+		bwm:              bwm,
+		ep:               e,
+		bandwidthEgress:  bandwidthEgress,
+		bandwidthIngress: bandwidthIngress,
+		priority:         priority,
 	}))
 	if err != nil {
 		e.getLogger().WithError(err).Error("Unable to enqueue endpoint policy bandwidth event")

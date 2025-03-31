@@ -10,9 +10,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"syscall"
 	"time"
+
+	"github.com/hmarr/codeowners"
 )
 
 const (
@@ -76,6 +79,111 @@ func (ct *ConnectivityTest) Timestamp() {
 func (ct *ConnectivityTest) Log(a ...interface{}) {
 	ct.Timestamp()
 	fmt.Fprintln(ct.params.Writer, a...)
+}
+
+// ownedScenario represents a piece of logic in the testsuite with a
+// corresponding filepath that indicates ownership (via CODEOWNERS).
+// It is used to inform developers who they may consult in the event that a
+// test fails without a clear indication why.
+type ownedScenario interface {
+	Name() string
+	FilePath() string
+}
+
+var defaultTestOwners ownedScenario
+
+func init() {
+	// Initialize in an init func to ensure that NewScenarioBase() can look
+	// up a couple of layers of stack to find a test file in order to
+	// determine default codeowners, in this case falling back to the
+	// owners of the overall test infrastructure.
+	//
+	// This will be used when there is a failure outside of a specific
+	// scenario provided by a test.
+	defaultTestOwners = defaultScenario{
+		ScenarioBase: NewScenarioBase(),
+	}
+}
+
+type defaultScenario struct {
+	ScenarioBase
+}
+
+func (s defaultScenario) Name() string {
+	return "cli-test-framework"
+}
+
+var ghWorkflowRegexp = regexp.MustCompile("^(?:.+?)/(?:.+?)/(.+?)@.*$")
+
+func (ct *ConnectivityTest) GetOwners(scenarios ...ownedScenario) []string {
+	if !ct.params.LogCodeOwners {
+		return nil
+	}
+
+	rules := make(map[ownedScenario]*codeowners.Rule)
+	for _, scenario := range scenarios {
+		rule, err := ct.CodeOwners.Match(scenario.FilePath())
+		if err != nil || rule == nil || rule.Owners == nil {
+			ct.Fatalf("Failed to find CODEOWNERS for test scenario. Developer BUG?"+
+				"\n\t\tname=%s path=%s err=%s", scenario.Name(), scenario.FilePath(), err)
+			return nil
+		}
+		rules[scenario] = rule
+	}
+
+	var workflowOwners []codeowners.Owner
+	var ghWorkflow string
+	// Example: cilium/cilium/.github/workflows/conformance-kind-proxy-embedded.yaml@refs/pull/37593/merge
+	ghWorkflowRef := os.Getenv("GITHUB_WORKFLOW_REF")
+	matches := ghWorkflowRegexp.FindStringSubmatch(ghWorkflowRef)
+	// here matches should either be nil (no match) or a slice with two values:
+	// the full match and the capture.
+	if len(matches) == 2 {
+		ghWorkflow = matches[1]
+	}
+	if ghWorkflow != "" {
+		workflowRule, err := ct.CodeOwners.Match(ghWorkflow)
+		if err != nil || workflowRule == nil || workflowRule.Owners == nil {
+			ct.Warnf("Failed to find CODEOWNERS for workflow %s: %s", ghWorkflow, err)
+		}
+		workflowOwners = workflowRule.Owners
+	}
+
+	excludeOwners := make(map[string]struct{})
+	for _, owner := range ct.Params().ExcludeCodeOwners {
+		excludeOwners[owner] = struct{}{}
+	}
+
+	var owners []string
+	for scenario, rule := range rules {
+		for _, o := range rule.Owners {
+			owner := o.String()
+			if _, ok := excludeOwners[owner]; ok {
+				continue
+			}
+			owners = append(owners, fmt.Sprintf("%s (%s)", owner, scenario.Name()))
+		}
+		for _, o := range workflowOwners {
+			owner := o.String()
+			if _, ok := excludeOwners[owner]; ok {
+				continue
+			}
+			owners = append(owners, fmt.Sprintf("%s (%s)", owner, ghWorkflow))
+		}
+	}
+	return owners
+}
+
+func (ct *ConnectivityTest) LogOwners(scenarios ...ownedScenario) {
+	owners := ct.GetOwners(scenarios...)
+	if len(owners) == 0 {
+		return
+	}
+
+	ct.Log("    ⛑️ The following owners are responsible for reliability of the testsuite: ")
+	for _, o := range owners {
+		ct.Log("        - " + o)
+	}
 }
 
 // Logf logs a formatted message.
@@ -228,7 +336,7 @@ func (t *Test) flush() {
 	if _, err := io.Copy(buf, t.logBuf); err != nil {
 		panic(err)
 	}
-	t.ctx.logger.Print(t, buf.String())
+	t.ctx.logger.Print(t, buf.Bytes())
 
 	// Assign a nil buffer so future writes go to user-specified writer.
 	t.logBuf = nil
@@ -389,6 +497,14 @@ func (a *Action) Fatalf(format string, s ...interface{}) {
 
 func timestamp() string {
 	return fmt.Sprintf("[%s] ", time.Now().Format(time.RFC3339))
+}
+
+func timestampBytes() []byte {
+	b := make([]byte, 0, 32) // roughly enough space
+	b = append(b, '[')
+	b = time.Now().AppendFormat(b, time.RFC3339)
+	b = append(b, ']', ' ')
+	return b
 }
 
 type debugWriter struct {

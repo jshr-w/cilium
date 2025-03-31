@@ -11,24 +11,19 @@ import (
 	"strings"
 
 	"github.com/cilium/dns"
-	"github.com/go-openapi/runtime/middleware"
 	"github.com/sirupsen/logrus"
 
-	. "github.com/cilium/cilium/api/v1/server/restapi/policy"
-	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/fqdn/dnsproxy"
-	"github.com/cilium/cilium/pkg/fqdn/matchpattern"
+	fqdnproxy "github.com/cilium/cilium/pkg/fqdn/proxy"
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/proxy"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
-	"github.com/cilium/cilium/pkg/proxy/logger"
 	proxytypes "github.com/cilium/cilium/pkg/proxy/types"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/u8proto"
@@ -53,35 +48,14 @@ const (
 // dnsNameManager will use the default resolver and, implicitly, the
 // default DNS cache. The proxy binds to all interfaces, and uses the
 // configured DNS proxy port (this may be 0 and so OS-assigned).
-func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, preCachePath string, ipcache fqdn.IPCache) (err error) {
-	cfg := fqdn.Config{
-		MinTTL:              option.Config.ToFQDNsMinTTL,
-		Cache:               fqdn.NewDNSCache(option.Config.ToFQDNsMinTTL),
-		GetEndpointsDNSInfo: d.getEndpointsDNSInfo,
-		IPCache:             ipcache,
-	}
-	// Disable cleanup tracking on the default DNS cache. This cache simply
-	// tracks which api.FQDNSelector are present in policy which apply to
-	// locally running endpoints.
-	cfg.Cache.DisableCleanupTrack()
-
-	nameManager := fqdn.NewNameManager(cfg)
-	d.policy.GetSelectorCache().SetLocalIdentityNotifier(nameManager)
-	d.dnsNameManager = nameManager
+func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, preCachePath string) (err error) {
+	d.policy.GetSelectorCache().SetLocalIdentityNotifier(d.dnsNameManager)
 
 	// Controller to cleanup TTL expired entries from the DNS policies.
 	d.dnsNameManager.StartGC(d.ctx)
 
 	// restore the global DNS cache state
-	epInfo := make([]fqdn.EndpointDNSInfo, 0, len(possibleEndpoints))
-	for _, ep := range possibleEndpoints {
-		epInfo = append(epInfo, fqdn.EndpointDNSInfo{
-			ID:         ep.StringID(),
-			DNSHistory: ep.DNSHistory,
-			DNSZombies: ep.DNSZombies,
-		})
-	}
-	d.dnsNameManager.RestoreCache(preCachePath, epInfo)
+	d.dnsNameManager.RestoreCache(preCachePath, possibleEndpoints)
 
 	// Do not start the proxy in dry mode or if L7 proxy is disabled.
 	// The proxy would not get any traffic in the dry mode anyway, and some of the socket
@@ -98,7 +72,7 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 			if isStatic {
 				port = oldPort
 			} else {
-				openLocalPorts := proxy.OpenLocalPorts()
+				openLocalPorts := d.l7Proxy.GetOpenLocalPorts()
 				if _, alreadyOpen := openLocalPorts[oldPort]; !alreadyOpen {
 					port = oldPort
 				} else {
@@ -120,50 +94,26 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 		ConcurrencyLimit:       option.Config.DNSProxyConcurrencyLimit,
 		ConcurrencyGracePeriod: option.Config.DNSProxyConcurrencyProcessingGracePeriod,
 	}
-	proxy.DefaultDNSProxy, err = dnsproxy.StartDNSProxy(dnsProxyConfig, d.lookupEPByIP, d.ipcache.LookupSecIDByIP, d.ipcache.LookupByIdentity,
+	var dnsProxy fqdnproxy.DNSProxier
+	dnsProxy, err = dnsproxy.StartDNSProxy(dnsProxyConfig, d.lookupEPByIP, d.ipcache.LookupSecIDByIP, d.ipcache.LookupByIdentity,
 		d.notifyOnDNSMsg)
+	d.dnsProxy.Set(dnsProxy)
 	if err == nil {
 		// Increase the ProxyPort reference count so that it will never get released.
-		err = d.l7Proxy.SetProxyPort(proxytypes.DNSProxyName, proxytypes.ProxyTypeDNS, proxy.DefaultDNSProxy.GetBindPort(), false)
-		if err == nil && port == proxy.DefaultDNSProxy.GetBindPort() {
+		err = d.l7Proxy.SetProxyPort(proxytypes.DNSProxyName, proxytypes.ProxyTypeDNS, dnsProxy.GetBindPort(), false)
+		if err == nil && port == dnsProxy.GetBindPort() {
 			log.Infof("Reusing previous DNS proxy port: %d", port)
 		}
-		proxy.DefaultDNSProxy.SetRejectReply(option.Config.FQDNRejectResponse)
+		dnsProxy.SetRejectReply(option.Config.FQDNRejectResponse)
 		// Restore old rules
 		for _, possibleEP := range possibleEndpoints {
 			// Upgrades from old ciliums have this nil
 			if possibleEP.DNSRules != nil || possibleEP.DNSRulesV2 != nil {
-				proxy.DefaultDNSProxy.RestoreRules(possibleEP)
+				dnsProxy.RestoreRules(possibleEP)
 			}
 		}
 	}
 	return err // filled by StartDNSProxy
-}
-
-// getEndpointsDNSInfo is used by the NameManager to iterate through endpoints
-// without having to have access to the EndpointManager.
-//
-// Optional parameter endpointID will cause this function to only return the
-// endpoint with the ID matching the parameter.
-func (d *Daemon) getEndpointsDNSInfo(endpointID string) []fqdn.EndpointDNSInfo {
-	eps := d.endpointManager.GetEndpoints()
-	if endpointID != "" {
-		ep, err := d.endpointManager.Lookup(endpointID)
-		if ep == nil || err != nil {
-			return nil
-		}
-		eps = []*endpoint.Endpoint{ep}
-	}
-	out := make([]fqdn.EndpointDNSInfo, 0, len(eps))
-	for _, ep := range eps {
-		out = append(out, fqdn.EndpointDNSInfo{
-			ID:         ep.StringID(),
-			ID64:       int64(ep.ID),
-			DNSHistory: ep.DNSHistory,
-			DNSZombies: ep.DNSZombies,
-		})
-	}
-	return out
 }
 
 // updateDNSDatapathRules updates the DNS proxy iptables rules. Must be
@@ -207,11 +157,21 @@ func (d *Daemon) lookupEPByIP(endpointAddr netip.Addr) (endpoint *endpoint.Endpo
 // It may return dnsproxy.ErrDNSRequestNoEndpoint{} error if the endpoint is nil.
 // Note that the caller should log beforehand the contextualized error.
 
-// epIPPort and serverAddr should match the original request, where epAddr is
+// epIPPort and serverAddrPort should match the original request, where epAddr is
 // the source for egress (the only case current).
 // serverID is the destination server security identity at the time of the DNS event.
-func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epIPPort string, serverID identity.NumericIdentity, serverAddr string, msg *dns.Msg, protocol string, allowed bool, stat *dnsproxy.ProxyRequestContext) error {
-	var protoID = u8proto.ProtoIDs[strings.ToLower(protocol)]
+func (d *Daemon) notifyOnDNSMsg(
+	lookupTime time.Time,
+	ep *endpoint.Endpoint,
+	epIPPort string,
+	serverID identity.NumericIdentity,
+	serverAddrPort netip.AddrPort,
+	msg *dns.Msg,
+	protocol string,
+	allowed bool,
+	stat *dnsproxy.ProxyRequestContext,
+) error {
+	protoID := u8proto.ProtoIDs[strings.ToLower(protocol)]
 	var verdict accesslog.FlowVerdict
 	var reason string
 	metricError := metricErrorAllow
@@ -271,7 +231,8 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 	// We determine the direction based on the DNS packet. The observation
 	// point is always Egress, however.
 	var flowType accesslog.FlowType
-	var addrInfo logger.AddressingInfo
+	var addrInfo accesslog.AddressingInfo
+	serverAddrPortStr := serverAddrPort.String()
 	if msg.Response {
 		flowType = accesslog.TypeResponse
 		addrInfo.DstIPPort = epIPPort
@@ -279,7 +240,7 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		// ignore error; log fields are best effort. Only returns error if endpoint
 		// is going away.
 		addrInfo.DstSecIdentity, _ = ep.GetSecurityIdentity()
-		addrInfo.SrcIPPort = serverAddr
+		addrInfo.SrcIPPort = serverAddrPortStr
 		addrInfo.SrcIdentity = serverID
 	} else {
 		flowType = accesslog.TypeRequest
@@ -287,7 +248,7 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		addrInfo.SrcEPID = ep.GetID()
 		// ignore error; same reason as above.
 		addrInfo.SrcSecIdentity, _ = ep.GetSecurityIdentity()
-		addrInfo.DstIPPort = serverAddr
+		addrInfo.DstIPPort = serverAddrPortStr
 		addrInfo.DstIdentity = serverID
 	}
 
@@ -296,12 +257,6 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		log.WithError(err).WithField(logfields.DNSName, qname).Error("cannot extract DNS message details")
 		return fmt.Errorf("failed to extract DNS message details: %w", err)
 	}
-
-	serverAddrPort, err := netip.ParseAddrPort(serverAddr)
-	if err != nil {
-		log.WithError(err).Error("cannot extract destination IP/port from DNS request")
-	}
-	ep.UpdateProxyStatistics("fqdn", strings.ToUpper(protocol), serverAddrPort.Port(), proxy.DefaultDNSProxy.GetBindPort(), false, !msg.Response, verdict)
 
 	if msg.Response && msg.Rcode == dns.RcodeSuccess && len(responseIPs) > 0 {
 		stat.PolicyGenerationTime.Start()
@@ -338,9 +293,11 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		// updates for the response IPs. Due to G1 performing all the work
 		// first, G2 executes T4 also as a no-op and releases the msg back to the
 		// pod at T5 before G1 would at T6.
+		//
+		// We do not do a `defer unlock()` here, as we should release the lock before
+		// doing final bookkeeping.
 		mutexAcquireStart := time.Now()
 		d.dnsNameManager.LockName(qname)
-		defer d.dnsNameManager.UnlockName(qname)
 
 		if d := time.Since(mutexAcquireStart); d >= option.Config.DNSProxyLockTimeout {
 			log.WithFields(logrus.Fields{
@@ -353,6 +310,10 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 				option.DNSProxyLockCount, option.DNSProxyLockTimeout)
 		}
 
+		logDebug := log.Logger.IsLevelEnabled(logrus.DebugLevel)
+		if logDebug {
+			log.WithField(logfields.EndpointID, ep.ID).Debug("Recording DNS lookup in endpoint specific cache")
+		}
 		// This must happen before the NameManager update below, to ensure that
 		// this data is included in the serialized Endpoint object.
 		// We also need to add to the cache before we purge any matching zombies
@@ -360,45 +321,56 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		// consistent if a regeneration happens between the two steps. If an update
 		// doesn't happen in the case, we play it safe and don't purge the zombie
 		// in case of races.
-		log.WithField(logfields.EndpointID, ep.ID).Debug("Recording DNS lookup in endpoint specific cache")
 		if updated := ep.DNSHistory.Update(lookupTime, qname, responseIPs, int(TTL)); updated {
 			ep.DNSZombies.ForceExpireByNameIP(lookupTime, qname, responseIPs...)
 			ep.SyncEndpointHeaderFile()
 		}
 
-		log.WithFields(logrus.Fields{
-			"qname": qname,
-			"ips":   responseIPs,
-		}).Debug("Updating DNS name in cache from response to query")
+		if logDebug {
+			log.WithFields(logrus.Fields{
+				"qname": qname,
+				"ips":   responseIPs,
+			}).Debug("Updating DNS name in cache from response to query")
+		}
 
 		updateCtx, updateCancel := context.WithTimeout(d.ctx, option.Config.FQDNProxyResponseMaxDelay)
 		defer updateCancel()
 		updateStart := time.Now()
 
-		dpUpdates := d.dnsNameManager.UpdateGenerateDNS(updateCtx, lookupTime, map[string]*fqdn.DNSIPRecords{
-			qname: {
-				IPs: responseIPs,
-				TTL: int(TTL),
-			}})
+		dpUpdates := d.dnsNameManager.UpdateGenerateDNS(updateCtx, lookupTime, qname, &fqdn.DNSIPRecords{
+			IPs: responseIPs,
+			TTL: int(TTL),
+		})
 
 		stat.PolicyGenerationTime.End(true)
 		stat.DataplaneTime.Start()
 
-		if err := dpUpdates.Wait(); err != nil {
+		if err := <-dpUpdates; err != nil {
 			log.Warning("Timed out waiting for datapath updates of FQDN IP information; returning response. Consider increasing --tofqdns-proxy-response-max-delay if this keeps happening.")
 			metrics.ProxyDatapathUpdateTimeout.Inc()
 		}
 
-		log.WithFields(logrus.Fields{
-			logfields.Duration:   time.Since(updateStart),
-			logfields.EndpointID: ep.GetID(),
-			"qname":              qname,
-		}).Debug("Waited for endpoints to regenerate due to a DNS response")
+		// Policy updates for this name have been pushed out; we can release the lock.
+		d.dnsNameManager.UnlockName(qname)
+
+		if logDebug {
+			log.WithFields(logrus.Fields{
+				logfields.Duration:   time.Since(updateStart),
+				logfields.EndpointID: ep.GetID(),
+				"qname":              qname,
+			}).Debug("Waited for endpoints to regenerate due to a DNS response")
+		}
 
 		endMetric()
 	}
 
 	stat.ProcessingTime.End(true)
+
+	bindPort := uint16(0)
+	if dnsProxy := d.dnsProxy.Get(); dnsProxy != nil {
+		bindPort = dnsProxy.GetBindPort()
+	}
+	ep.UpdateProxyStatistics("fqdn", strings.ToUpper(protocol), serverAddrPort.Port(), bindPort, false, !msg.Response, verdict)
 
 	// Ensure that there are no early returns from this function before the
 	// code below, otherwise the log record will not be made.
@@ -407,11 +379,13 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 	// requests because an identity isn't in the local cache yet.
 	logContext, lcncl := context.WithTimeout(d.ctx, 10*time.Millisecond)
 	defer lcncl()
-	record := logger.NewLogRecord(flowType, false,
-		func(lr *logger.LogRecord) { lr.LogRecord.TransportProtocol = accesslog.TransportProtocol(protoID) },
-		logger.LogTags.Verdict(verdict, reason),
-		logger.LogTags.Addressing(logContext, addrInfo),
-		logger.LogTags.DNS(&accesslog.LogRecordDNS{
+	record := d.proxyAccessLogger.NewLogRecord(flowType, false,
+		func(lr *accesslog.LogRecord, _ accesslog.EndpointInfoRegistry) {
+			lr.TransportProtocol = accesslog.TransportProtocol(protoID)
+		},
+		accesslog.LogTags.Verdict(verdict, reason),
+		accesslog.LogTags.Addressing(logContext, addrInfo),
+		accesslog.LogTags.DNS(&accesslog.LogRecordDNS{
 			Query:             qname,
 			IPs:               responseIPs,
 			TTL:               TTL,
@@ -422,90 +396,7 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 			AnswerTypes:       recordTypes,
 		}),
 	)
-	record.Log()
+	d.proxyAccessLogger.Log(record)
 
 	return nil
-}
-
-func getFqdnCacheHandler(d *Daemon, params GetFqdnCacheParams) middleware.Responder {
-	prefixMatcher, nameMatcher, source, err := parseFqdnFilters(params.Cidr, params.Matchpattern, params.Source)
-	if err != nil {
-		return api.Error(GetFqdnCacheBadRequestCode, err)
-	}
-
-	lookups, err := d.dnsNameManager.GetDNSHistoryModel("", prefixMatcher, nameMatcher, source)
-	switch {
-	case err != nil:
-		return api.Error(GetFqdnCacheBadRequestCode, err)
-	case len(lookups) == 0:
-		return NewGetFqdnCacheNotFound()
-	}
-
-	return NewGetFqdnCacheOK().WithPayload(lookups)
-}
-
-func deleteFqdnCacheHandler(d *Daemon, params DeleteFqdnCacheParams) middleware.Responder {
-	matchPatternStr := ""
-	if params.Matchpattern != nil {
-		matchPatternStr = *params.Matchpattern
-	}
-
-	err := d.dnsNameManager.DeleteDNSLookups(time.Now(), matchPatternStr)
-	if err != nil {
-		return api.Error(DeleteFqdnCacheBadRequestCode, err)
-	}
-	return NewDeleteFqdnCacheOK()
-}
-
-func getFqdnCacheIDHandler(d *Daemon, params GetFqdnCacheIDParams) middleware.Responder {
-	var epErr fqdn.NoEndpointIDMatch
-
-	prefixMatcher, nameMatcher, source, err := parseFqdnFilters(params.Cidr, params.Matchpattern, params.Source)
-	if err != nil {
-		return api.Error(GetFqdnCacheIDBadRequestCode, err)
-	}
-
-	lookups, err := d.dnsNameManager.GetDNSHistoryModel(params.ID, prefixMatcher, nameMatcher, source)
-	switch {
-	case errors.As(err, &epErr):
-		return api.Error(GetFqdnCacheIDNotFoundCode, err)
-	case err != nil:
-		return api.Error(GetFqdnCacheIDBadRequestCode, err)
-	case len(lookups) == 0:
-		return NewGetFqdnCacheIDNotFound()
-	}
-
-	return NewGetFqdnCacheIDOK().WithPayload(lookups)
-}
-
-func getFqdnNamesHandler(d *Daemon, params GetFqdnNamesParams) middleware.Responder {
-	payload := d.dnsNameManager.GetModel()
-	return NewGetFqdnNamesOK().WithPayload(payload)
-}
-
-func parseFqdnFilters(cidr, pattern, src *string) (fqdn.PrefixMatcherFunc, fqdn.NameMatcherFunc, string, error) {
-	prefixMatcher := func(ip netip.Addr) bool { return true }
-	if cidr != nil {
-		prefix, err := netip.ParsePrefix(*cidr)
-		if err != nil {
-			return nil, nil, "", err
-		}
-		prefixMatcher = func(ip netip.Addr) bool { return prefix.Contains(ip) }
-	}
-
-	nameMatcher := func(name string) bool { return true }
-	if pattern != nil {
-		matcher, err := matchpattern.ValidateWithoutCache(matchpattern.Sanitize(*pattern))
-		if err != nil {
-			return nil, nil, "", err
-		}
-		nameMatcher = func(name string) bool { return matcher.MatchString(name) }
-	}
-
-	source := ""
-	if src != nil {
-		source = *src
-	}
-
-	return prefixMatcher, nameMatcher, source, nil
 }

@@ -7,10 +7,13 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/statedb"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/cilium/cilium/pkg/annotation"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
@@ -20,6 +23,8 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/util/intstr"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -63,6 +68,7 @@ func newDB(t *testing.T) (*statedb.DB, statedb.Table[datapathTables.NodeAddress]
 }
 
 func Test_addK8sSVCs_ClusterIP(t *testing.T) {
+	logger := hivetest.Logger(t)
 	option.Config.LoadBalancerProtocolDifferentiation = true
 
 	k8sSvc := &slim_corev1.Service{
@@ -331,8 +337,9 @@ func Test_addK8sSVCs_ClusterIP(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -362,6 +369,7 @@ func Test_addK8sSVCs_ClusterIP(t *testing.T) {
 }
 
 func TestChangeSVCPort(t *testing.T) {
+	logger := hivetest.Logger(t)
 	option.Config.LoadBalancerProtocolDifferentiation = true
 
 	k8sSvc := &slim_corev1.Service{
@@ -466,8 +474,9 @@ func TestChangeSVCPort(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -486,6 +495,7 @@ func TestChangeSVCPort(t *testing.T) {
 }
 
 func Test_addK8sSVCs_NodePort(t *testing.T) {
+	logger := hivetest.Logger(t)
 	enableNodePortBak := option.Config.EnableNodePort
 	option.Config.EnableNodePort = true
 	option.Config.LoadBalancerProtocolDifferentiation = true
@@ -933,8 +943,9 @@ func Test_addK8sSVCs_NodePort(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -963,6 +974,7 @@ func Test_addK8sSVCs_NodePort(t *testing.T) {
 }
 
 func Test_addK8sSVCs_GH9576_1(t *testing.T) {
+	logger := hivetest.Logger(t)
 	// Adding service without any endpoints and later on modifying the service,
 	// cilium should:
 	// 1) delete the non existing services from the datapath.
@@ -1229,8 +1241,9 @@ func Test_addK8sSVCs_GH9576_1(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -1254,6 +1267,7 @@ func Test_addK8sSVCs_GH9576_1(t *testing.T) {
 }
 
 func Test_addK8sSVCs_GH9576_2(t *testing.T) {
+	logger := hivetest.Logger(t)
 	// Adding service without any endpoints and later on modifying the service,
 	// cilium should:
 	// 1) delete the non existing endpoints from the datapath, i.e., updating
@@ -1518,8 +1532,9 @@ func Test_addK8sSVCs_GH9576_2(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -1543,6 +1558,7 @@ func Test_addK8sSVCs_GH9576_2(t *testing.T) {
 }
 
 func Test_addK8sSVCs_ExternalIPs(t *testing.T) {
+	logger := hivetest.Logger(t)
 	enableNodePortBak := option.Config.EnableNodePort
 	option.Config.EnableNodePort = true
 	option.Config.LoadBalancerProtocolDifferentiation = true
@@ -2441,8 +2457,9 @@ func Test_addK8sSVCs_ExternalIPs(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -2475,6 +2492,7 @@ func Test_addK8sSVCs_ExternalIPs(t *testing.T) {
 }
 
 func TestHeadless(t *testing.T) {
+	logger := hivetest.Logger(t)
 	option.Config.LoadBalancerProtocolDifferentiation = true
 
 	k8sSvc := &slim_corev1.Service{
@@ -2572,8 +2590,9 @@ func TestHeadless(t *testing.T) {
 	}
 
 	db, nodeAddrs := newDB(t)
-	k8sSvcCache := k8s.NewServiceCache(db, nodeAddrs, k8s.NewSVCMetricsNoop())
+	k8sSvcCache := k8s.NewServiceCache(logger, db, nodeAddrs, k8s.NewSVCMetricsNoop())
 	svcWatcher := &K8sServiceWatcher{
+		logger:      logger,
 		k8sSvcCache: k8sSvcCache,
 		svcManager:  svcManager,
 	}
@@ -2591,4 +2610,79 @@ func TestHeadless(t *testing.T) {
 	require.Equal(t, len(delstWanted), svcDeleteManagerCalls)
 	require.EqualValues(t, upsertsWanted, upserts)
 	require.EqualValues(t, delstWanted, delst)
+}
+
+func TestK8sServiceWatcher_checkServiceNodeExposure(t *testing.T) {
+	tests := []struct {
+		name           string // description of this test case
+		nodeLabels     map[string]string
+		svcAnnotations map[string]string
+		wantExposed    bool
+	}{
+		{
+			name:           "no annotation matches all nodes",
+			nodeLabels:     map[string]string{},
+			svcAnnotations: map[string]string{},
+			wantExposed:    true,
+		},
+		{
+			name:           "match via service.cilium.io/node annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "beefy"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeExposure: "beefy"},
+			wantExposed:    true,
+		},
+		{
+			name:           "no match via service.cilium.io/node annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "beefy"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeExposure: "slow"},
+			wantExposed:    false,
+		},
+		{
+			name:           "exact match via service.cilium.io/node-selector annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "beefy"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeSelectorExposure: "service.cilium.io/node == beefy"},
+			wantExposed:    true,
+		},
+		{
+			name:           "no match via exact service.cilium.io/node-selector annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "beefy"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeSelectorExposure: "service.cilium.io/node == slow"},
+			wantExposed:    false,
+		},
+		{
+			name:           "in match via service.cilium.io/node-selector annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "beefy"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeSelectorExposure: "service.cilium.io/node in ( beefy , slow )"},
+			wantExposed:    true,
+		},
+		{
+			name:           "in match via service.cilium.io/node-selector annotation 2",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "slow"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeSelectorExposure: "service.cilium.io/node in ( beefy , slow )"},
+			wantExposed:    true,
+		},
+		{
+			name:           "no match via in service.cilium.io/node-selector annotation",
+			nodeLabels:     map[string]string{"service.cilium.io/node": "another"},
+			svcAnnotations: map[string]string{annotation.ServiceNodeSelectorExposure: "service.cilium.io/node in ( beefy , slow )"},
+			wantExposed:    false,
+		},
+		{
+			name:       "no match via via node annotation if node-selector exists and doesn't match",
+			nodeLabels: map[string]string{"service.cilium.io/node": "another"},
+			svcAnnotations: map[string]string{
+				annotation.ServiceNodeSelectorExposure: "service.cilium.io/node in ( beefy , slow )",
+				annotation.ServiceNodeExposure:         "another",
+			},
+			wantExposed: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k := &K8sServiceWatcher{logger: hivetest.Logger(t), localNodeStore: node.NewTestLocalNodeStore(node.LocalNode{Node: types.Node{Labels: tt.nodeLabels}})}
+			exposedOnLocalNode, err := k.checkServiceNodeExposure(&k8s.Service{Annotations: tt.svcAnnotations})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantExposed, exposedOnLocalNode)
+		})
+	}
 }

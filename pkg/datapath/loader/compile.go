@@ -108,7 +108,8 @@ var (
 		"-Wno-gnu-variable-sized-type-not-at-end",
 		"-Wdeclaration-after-statement",
 		"-Wimplicit-int-conversion",
-		"-Wenum-conversion"}
+		"-Wenum-conversion",
+		"-Wimplicit-fallthrough"}
 
 	// testIncludes allows the unit tests to inject additional include
 	// paths into the compile command at test time. It is usually nil.
@@ -168,11 +169,6 @@ func pidFromProcess(proc *os.Process) string {
 //
 // May output assembly or source code after prepocessing.
 func compile(ctx context.Context, prog *progInfo, dir *directoryInfo) (string, error) {
-	possibleCPUs, err := ebpf.PossibleCPU()
-	if err != nil {
-		return "", fmt.Errorf("failed to get number of possible CPUs: %w", err)
-	}
-
 	compileArgs := append(testIncludes,
 		fmt.Sprintf("-I%s", path.Join(dir.Runtime, "globals")),
 		fmt.Sprintf("-I%s", dir.State),
@@ -188,7 +184,6 @@ func compile(ctx context.Context, prog *progInfo, dir *directoryInfo) (string, e
 	}
 
 	compileArgs = append(compileArgs, standardCFlags...)
-	compileArgs = append(compileArgs, fmt.Sprintf("-D__NR_CPUS__=%d", possibleCPUs))
 	compileArgs = append(compileArgs, "-mcpu="+getBPFCPU())
 	compileArgs = append(compileArgs, prog.Options...)
 	compileArgs = append(compileArgs,
@@ -394,7 +389,7 @@ func compileOverlay(ctx context.Context, opts []string) error {
 	return nil
 }
 
-func compileWireguard(ctx context.Context, opts []string) (err error) {
+func compileWireguard(ctx context.Context) (err error) {
 	dirs := &directoryInfo{
 		Library: option.Config.BpfDir,
 		Runtime: option.Config.StateDir,
@@ -416,7 +411,6 @@ func compileWireguard(ctx context.Context, opts []string) (err error) {
 		Source:     wireguardProg,
 		Output:     wireguardObj,
 		OutputType: outputObject,
-		Options:    opts,
 	}
 	// Write out assembly and preprocessing files for debugging purposes
 	if _, err := compile(ctx, prog, dirs); err != nil {

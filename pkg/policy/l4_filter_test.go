@@ -6,15 +6,20 @@ package policy
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
 	"sync"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	"github.com/cilium/proxy/pkg/policy/api/kafka"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/cilium/cilium/pkg/crypto/certificatemanager"
 	"github.com/cilium/cilium/pkg/defaults"
+	envoypolicy "github.com/cilium/cilium/pkg/envoy/policy"
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
@@ -57,10 +62,10 @@ type testData struct {
 	cachedSelectorWorldV6 CachedSelector
 }
 
-func newTestData() *testData {
+func newTestData(logger *slog.Logger) *testData {
 	td := &testData{
-		sc:                testNewSelectorCache(nil),
-		repo:              NewPolicyRepository(nil, &fakeCertificateManager{}, nil, nil, api.NewPolicyMetricsNoop()),
+		sc:                testNewSelectorCache(logger, nil),
+		repo:              NewPolicyRepository(logger, nil, &fakeCertificateManager{}, envoypolicy.NewEnvoyL7RulesTranslator(logger, certificatemanager.NewMockSecretManagerInline()), nil, api.NewPolicyMetricsNoop()),
 		testPolicyContext: &testPolicyContextType{},
 	}
 	td.testPolicyContext.sc = td.sc
@@ -93,9 +98,7 @@ func newTestData() *testData {
 func (td *testData) withIDs(initIDs ...identity.IdentityMap) *testData {
 	initial := identity.IdentityMap{}
 	for _, im := range initIDs {
-		for id, lbls := range im {
-			initial[id] = lbls
-		}
+		maps.Copy(initial, im)
 	}
 	wg := &sync.WaitGroup{}
 	td.sc.UpdateIdentities(initial, nil, wg)
@@ -131,14 +134,13 @@ func (td *testData) policyMapEquals(t *testing.T, expectedIn, expectedOut L4Poli
 	defer td.repo.mutex.RUnlock()
 	pol, err := td.repo.resolvePolicyLocked(idA)
 	require.NoError(t, err)
-	defer pol.Detach()
+	defer pol.detach(true, 0)
 
 	if expectedIn != nil {
 		require.True(t, expectedIn.TestingOnlyEquals(pol.L4Policy.Ingress.PortRules), expectedIn.TestingOnlyDiff(pol.L4Policy.Ingress.PortRules))
 	}
 
 	if expectedOut != nil {
-
 		require.True(t, expectedOut.TestingOnlyEquals(pol.L4Policy.Egress.PortRules), expectedOut.TestingOnlyDiff(pol.L4Policy.Egress.PortRules))
 	}
 }
@@ -158,6 +160,22 @@ func (td *testData) policyInvalid(t *testing.T, errStr string, rules ...*api.Rul
 	_, err := td.repo.resolvePolicyLocked(idA)
 	require.Error(t, err)
 	require.ErrorContains(t, err, errStr)
+}
+
+// policyValid checks that the set of rules does not results in an error
+func (td *testData) policyValid(t *testing.T, rules ...*api.Rule) {
+	t.Helper()
+	td.withIDs(ruleTestIDs)
+	for _, r := range rules {
+		if r.EndpointSelector.LabelSelector == nil {
+			r.EndpointSelector = endpointSelectorA
+		}
+		require.NoError(t, r.Sanitize())
+	}
+	td.repo.ReplaceByLabels(rules, []labels.LabelArray{{}})
+
+	_, err := td.repo.resolvePolicyLocked(idA)
+	require.NoError(t, err)
 }
 
 // testPolicyContexttype is a dummy context used when evaluating rules.
@@ -239,7 +257,7 @@ func init() {
 // +-----+-----------------+----------+-----------------+------------------------------------------------------+
 
 func TestMergeAllowAllL3AndAllowAllL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	// Case 1A: Specify WildcardEndpointSelector explicitly.
 	rule1 := api.Rule{
 		EndpointSelector: endpointSelectorA,
@@ -269,7 +287,7 @@ func TestMergeAllowAllL3AndAllowAllL7(t *testing.T) {
 
 	expected := NewL4PolicyMapWithValues(map[string]*L4Filter{"80/TCP": {
 		Port: 80, Protocol: api.ProtoTCP, U8Proto: 6,
-		L7Parser: ParserTypeNone, Ingress: true, wildcard: td.wildcardCachedSelector,
+		Ingress: true, wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: nil,
 		},
@@ -316,7 +334,7 @@ func TestMergeAllowAllL3AndAllowAllL7(t *testing.T) {
 // at L7, but still redirected at the proxy.
 // Should resolve to one rule.
 func TestMergeAllowAllL3AndShadowedL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	rule1 := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Ingress: []api.IngressRule{
@@ -353,13 +371,13 @@ func TestMergeAllowAllL3AndShadowedL7(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: "http",
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}, {}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress:    true,
@@ -406,13 +424,13 @@ func TestMergeAllowAllL3AndShadowedL7(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}, {}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -427,7 +445,7 @@ func TestMergeAllowAllL3AndShadowedL7(t *testing.T) {
 // Case 3: allow all at L3 in both rules. Both rules have same parser type and
 // same API resource specified at L7 for HTTP.
 func TestMergeIdenticalAllowAllL3AndRestrictedL7HTTP(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	identicalHTTPRule := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Ingress: []api.IngressRule{
@@ -469,13 +487,13 @@ func TestMergeIdenticalAllowAllL3AndRestrictedL7HTTP(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress:    true,
@@ -487,7 +505,7 @@ func TestMergeIdenticalAllowAllL3AndRestrictedL7HTTP(t *testing.T) {
 
 // Case 4: identical allow all at L3 with identical restrictions on Kafka.
 func TestMergeIdenticalAllowAllL3AndRestrictedL7Kafka(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	identicalKafkaRule := api.Rule{
 		EndpointSelector: endpointSelectorA,
@@ -530,13 +548,13 @@ func TestMergeIdenticalAllowAllL3AndRestrictedL7Kafka(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeKafka,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeKafka,
+				Priority: ListenerPriorityKafka,
 				L7Rules: api.L7Rules{
 					Kafka: []kafka.PortRule{{Topic: "foo"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress:    true,
@@ -549,7 +567,7 @@ func TestMergeIdenticalAllowAllL3AndRestrictedL7Kafka(t *testing.T) {
 // Case 5: use conflicting protocols on the same port in different rules. This
 // is not supported, so return an error.
 func TestMergeIdenticalAllowAllL3AndMismatchingParsers(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	// Case 5A: Kafka first, HTTP second.
 	conflictingParsersRule := api.Rule{
@@ -711,7 +729,7 @@ func TestMergeIdenticalAllowAllL3AndMismatchingParsers(t *testing.T) {
 
 // TLS policy without L7 rules does not inspect L7, uses L7ParserType "tls"
 func TestMergeTLSTCPPolicy(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	egressRule := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Egress: []api.EgressRule{
@@ -754,10 +772,11 @@ func TestMergeTLSTCPPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeTLS,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
+				L7Parser: ParserTypeTLS,
+				Priority: ListenerPriorityTLS,
 				TerminatingTLS: &TLSContext{
 					FromFile:         true,
 					TrustedCA:        "fake ca tls-cert",
@@ -776,10 +795,6 @@ func TestMergeTLSTCPPolicy(t *testing.T) {
 						Name: "tls-ca-certs",
 					},
 				},
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
-				L7Rules:         api.L7Rules{},
-				isRedirect:      true,
 			},
 		},
 		Ingress: false,
@@ -793,7 +808,7 @@ func TestMergeTLSTCPPolicy(t *testing.T) {
 }
 
 func TestMergeTLSHTTPPolicy(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	egressRule := api.Rule{
 		Egress: []api.EgressRule{
 			{
@@ -838,10 +853,11 @@ func TestMergeTLSHTTPPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				TerminatingTLS: &TLSContext{
 					FromFile:         true,
 					TrustedCA:        "fake ca tls-cert",
@@ -860,12 +876,9 @@ func TestMergeTLSHTTPPolicy(t *testing.T) {
 						Name: "tls-ca-certs",
 					},
 				},
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: false,
@@ -879,7 +892,7 @@ func TestMergeTLSHTTPPolicy(t *testing.T) {
 }
 
 func TestMergeTLSSNIPolicy(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	egressRule := api.Rule{
 		Egress: []api.EgressRule{
 			{
@@ -940,10 +953,11 @@ func TestMergeTLSSNIPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				TerminatingTLS: &TLSContext{
 					FromFile:         true,
 					TrustedCA:        "fake ca tls-cert",
@@ -962,13 +976,10 @@ func TestMergeTLSSNIPolicy(t *testing.T) {
 						Name: "tls-ca-certs",
 					},
 				},
-				ServerNames:     StringSet{"www.foo.com": {}, "www.bar.com": {}},
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
+				ServerNames: StringSet{"www.foo.com": {}, "www.bar.com": {}},
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: false,
@@ -982,7 +993,7 @@ func TestMergeTLSSNIPolicy(t *testing.T) {
 }
 
 func TestMergeListenerPolicy(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 
 	//
 	// no namespace (NodeFirewall policy): Can not refer to EnvoyConfig
@@ -1073,14 +1084,12 @@ func TestMergeListenerPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeCRD,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
-				isRedirect:      true,
-				Listener:        "/shared-cec/test",
+				L7Parser: ParserTypeCRD,
+				Priority: ListenerPriorityCRD,
+				Listener: "/shared-cec/test",
 			},
 		},
 		Ingress: false,
@@ -1133,14 +1142,12 @@ func TestMergeListenerPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeCRD,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
-				isRedirect:      true,
-				Listener:        "default/test-cec/test",
+				L7Parser: ParserTypeCRD,
+				Priority: ListenerPriorityCRD,
+				Listener: "default/test-cec/test",
 			},
 		},
 		Ingress: false,
@@ -1194,14 +1201,12 @@ func TestMergeListenerPolicy(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeCRD,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: nil, // no proxy redirect
 			td.cachedSelectorC: &PerSelectorPolicy{
-				EnvoyHTTPRules:  nil,
-				CanShortCircuit: false,
-				isRedirect:      true,
-				Listener:        "/shared-cec/test",
+				L7Parser: ParserTypeCRD,
+				Priority: ListenerPriorityCRD,
+				Listener: "/shared-cec/test",
 			},
 		},
 		Ingress: false,
@@ -1218,7 +1223,7 @@ func TestMergeListenerPolicy(t *testing.T) {
 // in another rule. Should resolve to just allowing all on L3/L7 (first rule
 // shadows the second).
 func TestL3RuleShadowedByL3AllowAll(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	// Case 6A: Specify WildcardEndpointSelector explicitly.
 	shadowRule := api.Rule{
 		EndpointSelector: endpointSelectorA,
@@ -1251,7 +1256,6 @@ func TestL3RuleShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeNone,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB:        nil,
 			td.wildcardCachedSelector: nil,
@@ -1297,7 +1301,6 @@ func TestL3RuleShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeNone,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: nil,
 			td.cachedSelectorB:        nil,
@@ -1316,7 +1319,7 @@ func TestL3RuleShadowedByL3AllowAll(t *testing.T) {
 // which restricts on L7. Should resolve to just allowing all on L3/L7 (first rule
 // shadows the second), but setting traffic to the HTTP proxy.
 func TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	// Case 7A: selects specific endpoint with L7 restrictions rule first, then
 	// rule which selects all endpoints and allows all on L7. Net result sets
 	// parser type to whatever is in first rule, but without the restriction
@@ -1357,14 +1360,14 @@ func TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: nil,
 			td.cachedSelectorA: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -1415,14 +1418,14 @@ func TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: nil,
 			td.cachedSelectorA: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -1440,7 +1443,7 @@ func TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(t *testing.T) {
 // Should resolve to just allowing all on L3, but restricting on L7 for both
 // wildcard and the specified endpoint.
 func TestL3RuleWithL7RuleShadowedByL3AllowAll(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	// Case 8A: selects specific endpoint with L7 restrictions rule first, then
 	// rule which selects all endpoints and restricts on the same resource on L7.
 	// PerSelectorPolicies contains entries for both endpoints selected in each rule
@@ -1486,19 +1489,20 @@ func TestL3RuleWithL7RuleShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 			td.cachedSelectorA: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -1555,19 +1559,20 @@ func TestL3RuleWithL7RuleShadowedByL3AllowAll(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 			td.cachedSelectorA: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -1581,10 +1586,94 @@ func TestL3RuleWithL7RuleShadowedByL3AllowAll(t *testing.T) {
 }
 
 // Case 9: allow all at L3 and restricts on L7 in one rule, and in another rule,
-// select an endpoint which restricts on different L7 protocol.
+// on the same selector restricts on different L7 protocol.
 // Should fail as cannot have conflicting parsers on same port.
 func TestL3SelectingEndpointAndL3AllowAllMergeConflictingL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
+	// Case 9A: Kafka first, then HTTP.
+	conflictingL7Rule := api.Rule{
+		EndpointSelector: endpointSelectorA,
+		Ingress: []api.IngressRule{
+			{
+				IngressCommonRule: api.IngressCommonRule{
+					FromEndpoints: []api.EndpointSelector{endpointSelectorB},
+				},
+				ToPorts: []api.PortRule{{
+					Ports: []api.PortProtocol{
+						{Port: "80", Protocol: api.ProtoTCP},
+					},
+					Rules: &api.L7Rules{
+						Kafka: []kafka.PortRule{
+							{Topic: "foo"},
+						},
+					},
+				}},
+			},
+			{
+				IngressCommonRule: api.IngressCommonRule{
+					FromEndpoints: []api.EndpointSelector{endpointSelectorB},
+				},
+				ToPorts: []api.PortRule{{
+					Ports: []api.PortProtocol{
+						{Port: "80", Protocol: api.ProtoTCP},
+					},
+					Rules: &api.L7Rules{
+						HTTP: []api.PortRuleHTTP{
+							{Method: "GET", Path: "/"},
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	td.policyInvalid(t, "cannot merge conflicting L7 parsers", &conflictingL7Rule)
+
+	// Case 9B: HTTP first, then Kafka.
+	conflictingL7Rule = api.Rule{
+		EndpointSelector: endpointSelectorA,
+		Ingress: []api.IngressRule{
+			{
+				IngressCommonRule: api.IngressCommonRule{
+					FromEndpoints: []api.EndpointSelector{endpointSelectorB},
+				},
+				ToPorts: []api.PortRule{{
+					Ports: []api.PortProtocol{
+						{Port: "80", Protocol: api.ProtoTCP},
+					},
+					Rules: &api.L7Rules{
+						HTTP: []api.PortRuleHTTP{
+							{Method: "GET", Path: "/"},
+						},
+					},
+				}},
+			},
+			{
+				IngressCommonRule: api.IngressCommonRule{
+					FromEndpoints: []api.EndpointSelector{endpointSelectorB},
+				},
+				ToPorts: []api.PortRule{{
+					Ports: []api.PortProtocol{
+						{Port: "80", Protocol: api.ProtoTCP},
+					},
+					Rules: &api.L7Rules{
+						Kafka: []kafka.PortRule{
+							{Topic: "foo"},
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	td.policyInvalid(t, "cannot merge conflicting L7 parsers", &conflictingL7Rule)
+}
+
+// Case 9b: allow all at L3 and restricts on L7 in one rule, and in another rule,
+// select an endpoint which restricts on different L7 protocol, but on different selectors,
+// which is now possible.
+func TestL3SelectingEndpointAndL3AllowAllMergeDifferentL7(t *testing.T) {
+	td := newTestData(hivetest.Logger(t))
 	// Case 9A: Kafka first, then HTTP.
 	conflictingL7Rule := api.Rule{
 		EndpointSelector: endpointSelectorA,
@@ -1622,7 +1711,7 @@ func TestL3SelectingEndpointAndL3AllowAllMergeConflictingL7(t *testing.T) {
 		},
 	}
 
-	td.policyInvalid(t, "cannot merge conflicting L7 parsers", &conflictingL7Rule)
+	td.policyValid(t, &conflictingL7Rule)
 
 	// Case 9B: HTTP first, then Kafka.
 	conflictingL7Rule = api.Rule{
@@ -1661,13 +1750,13 @@ func TestL3SelectingEndpointAndL3AllowAllMergeConflictingL7(t *testing.T) {
 		},
 	}
 
-	td.policyInvalid(t, "cannot merge conflicting L7 parsers", &conflictingL7Rule)
+	td.policyValid(t, &conflictingL7Rule)
 }
 
 // Case 10: restrict same path / method on L7 in both rules,
 // but select different endpoints in each rule.
 func TestMergingWithDifferentEndpointsSelectedAllowSameL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	selectDifferentEndpointsRestrictL7 := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Ingress: []api.IngressRule{
@@ -1709,19 +1798,20 @@ func TestMergingWithDifferentEndpointsSelectedAllowSameL7(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorC: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 			td.cachedSelectorA: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 		},
 		Ingress: true,
@@ -1736,7 +1826,7 @@ func TestMergingWithDifferentEndpointsSelectedAllowSameL7(t *testing.T) {
 
 // Case 11: allow all on L7 in both rules, but select different endpoints in each rule.
 func TestMergingWithDifferentEndpointSelectedAllowAllL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	selectDifferentEndpointsAllowAllL7 := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Ingress: []api.IngressRule{
@@ -1768,7 +1858,6 @@ func TestMergingWithDifferentEndpointSelectedAllowAllL7(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: nil,
-		L7Parser: ParserTypeNone,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorA: nil,
 			td.cachedSelectorC: nil,
@@ -1787,7 +1876,7 @@ func TestMergingWithDifferentEndpointSelectedAllowAllL7(t *testing.T) {
 // the host should always be allowed. From Host should go to proxy allow all;
 // other L3 should restrict at L7 in a separate filter.
 func TestAllowingLocalhostShadowsL7(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	// This test checks that when the AllowLocalhost=always option is
 	// enabled, we always wildcard the host at L7. That means we need to
 	// set the option in the config, and of course clean up afterwards so
@@ -1823,13 +1912,13 @@ func TestAllowingLocalhostShadowsL7(t *testing.T) {
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeHTTP,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: &PerSelectorPolicy{
+				L7Parser: ParserTypeHTTP,
+				Priority: ListenerPriorityHTTP,
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
-				isRedirect: true,
 			},
 			td.cachedSelectorHost: nil, // no proxy redirect
 		},
@@ -1841,7 +1930,7 @@ func TestAllowingLocalhostShadowsL7(t *testing.T) {
 }
 
 func TestEntitiesL3(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	allowWorldRule := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Egress: []api.EgressRule{
@@ -1858,7 +1947,6 @@ func TestEntitiesL3(t *testing.T) {
 		Protocol: api.ProtoAny,
 		U8Proto:  0,
 		wildcard: td.wildcardCachedSelector,
-		L7Parser: ParserTypeNone,
 		PerSelectorPolicies: L7DataMap{
 			td.wildcardCachedSelector: nil,
 		},
@@ -1871,7 +1959,7 @@ func TestEntitiesL3(t *testing.T) {
 
 // Case 13: deny all at L3 in case of an empty non-nil toEndpoints slice.
 func TestEgressEmptyToEndpoints(t *testing.T) {
-	td := newTestData()
+	td := newTestData(hivetest.Logger(t))
 	rule := api.Rule{
 		EndpointSelector: endpointSelectorA,
 		Egress: []api.EgressRule{

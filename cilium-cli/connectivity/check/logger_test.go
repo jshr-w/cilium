@@ -5,7 +5,6 @@ package check
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -53,8 +52,8 @@ func TestConcurrentLogger(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logBuf := &bytes.Buffer{}
-			logger := NewConcurrentLogger(logBuf, tt.concurrency)
-			logger.Start(context.Background())
+			logger := NewConcurrentLogger(logBuf)
+			logger.Start()
 
 			connTests := make([]*ConnectivityTest, 0, tt.concurrency)
 			wg := &sync.WaitGroup{}

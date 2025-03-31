@@ -13,7 +13,6 @@ cilium-operator-aws [flags]
 ```
       --auto-create-cilium-pod-ip-pools map                  Automatically create CiliumPodIPPool resources on startup. Specify pools in the form of <pool>=ipv4-cidrs:<cidr>,[<cidr>...];ipv4-mask-size:<size> (multiple pools can also be passed by repeating the CLI flag)
       --aws-enable-prefix-delegation                         Allows operator to allocate prefixes to ENIs instead of individual IP addresses
-      --aws-instance-limit-mapping map                       Add or overwrite mappings of AWS instance limit in the form of {"AWS instance type": "Maximum Network Interfaces","IPv4 Addresses per Interface","IPv6 Addresses per Interface"}. cli example: --aws-instance-limit-mapping=a1.medium=2,4,4 --aws-instance-limit-mapping=a2.somecustomflavor=4,5,6 configmap example: {"a1.medium": "2,4,4", "a2.somecustomflavor": "4,5,6"}
       --aws-release-excess-ips                               Enable releasing excess free IP addresses from AWS ENI.
       --aws-use-primary-address                              Allows for using primary address of the ENI for allocations on the node
       --ces-max-ciliumendpoints-per-ces int                  Maximum number of CiliumEndpoints allowed in a CES (default 100)
@@ -60,7 +59,6 @@ cilium-operator-aws [flags]
       --enable-lb-ipam                                       Enable LB IPAM (default true)
       --enable-metrics                                       Enable Prometheus metrics
       --enable-node-ipam                                     Enable Node IPAM
-      --enable-node-port                                     Enable NodePort type services by Cilium
       --enable-node-selector-labels                          Enable use of node label based identity
       --enable-policy string                                 Enable policy enforcement (default "default")
       --enable-policy-secrets-sync                           Enables fan-in TLS secrets sync from multiple namespaces to singular namespace (specified by tls-interception-secrets-namespace flag)
@@ -81,6 +79,7 @@ cilium-operator-aws [flags]
       --identity-gc-rate-interval duration                   Interval used for rate limiting the GC of security identities (default 1m0s)
       --identity-gc-rate-limit int                           Maximum number of security identities that will be deleted within the identity-gc-rate-interval (default 2500)
       --identity-heartbeat-timeout duration                  Timeout after which identity expires on lack of heartbeat (default 30m0s)
+      --identity-management-mode string                      Configure whether Cilium Identities are managed by cilium-agent, cilium-operator, or both (default "agent")
       --ingress-default-lb-mode string                       Default loadbalancer mode for Ingress. Applicable values: dedicated, shared (default "dedicated")
       --ingress-default-request-timeout duration             Default request timeout for Ingress.
       --ingress-default-secret-name string                   Default secret name for Ingress.
@@ -94,14 +93,13 @@ cilium-operator-aws [flags]
       --ingress-shared-lb-service-name string                Name of shared LB service name for Ingress. (default "cilium-ingress")
       --instance-tags-filter map                             EC2 Instance tags in the form of k1=v1,k2=v2 (multiple k/v pairs can also be passed by repeating the CLI flag
       --ipam string                                          Backend to use for IPAM (default "eni")
-      --k8s-api-server string                                Kubernetes API server URL
+      --k8s-api-server-urls strings                          Kubernetes API server URLs
       --k8s-client-connection-keep-alive duration            Configures the keep alive duration of K8s client connections. K8 client is disabled if the value is set to 0 (default 30s)
       --k8s-client-connection-timeout duration               Configures the timeout of K8s client connections. K8s client is disabled if the value is set to 0 (default 30s)
       --k8s-heartbeat-timeout duration                       Configures the timeout for api-server heartbeat, set to 0 to disable (default 30s)
       --k8s-kubeconfig-path string                           Absolute path of the kubernetes kubeconfig file
       --k8s-namespace string                                 Name of the Kubernetes namespace in which Cilium Operator is deployed in
       --k8s-service-proxy-name string                        Value of K8s service-proxy-name label for which Cilium handles the services (empty = all services without service.kubernetes.io/service-proxy-name label)
-      --kube-proxy-replacement string                        Enable only selected features (will panic if any selected feature cannot be enabled) ("false"), or enable all features (will panic if any feature cannot be enabled) ("true") (default "false")
       --kvstore string                                       Key-value store type
       --kvstore-lease-ttl duration                           Time-to-live for the KVstore lease. (default 15m0s)
       --kvstore-max-consecutive-quorum-errors uint           Max acceptable kvstore consecutive quorum errors before the operator assumes permanent failure (default 2)
@@ -143,7 +141,6 @@ cilium-operator-aws [flags]
       --synchronize-k8s-services                             Synchronize Kubernetes services to kvstore (default true)
       --taint-sync-workers int                               Number of workers used to synchronize node tains and conditions (default 10)
       --unmanaged-pod-watcher-interval int                   Interval to check for unmanaged kube-dns pods (0 to disable) (default 15)
-      --update-ec2-adapter-limit-via-api                     Use the EC2 API to update the instance type to adapter limits (default true)
       --validate-network-policy                              Whether to enable or disable the informational network policy validator (default true)
       --version                                              Print version information
 ```
