@@ -27,7 +27,7 @@ import (
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-func TestRegisterController(t *testing.T) {
+func TestRegisterControllerDefault(t *testing.T) {
 	defer goleak.VerifyNone(
 		t,
 		// To ignore goroutine started by the workqueue. It reports metrics
@@ -81,7 +81,7 @@ func TestRegisterController(t *testing.T) {
 	}
 }
 
-func TestNotRegisterControllerWithCESDisabled(t *testing.T) {
+func TestNotRegisterControllerWithCESDisabledDefault(t *testing.T) {
 	defer goleak.VerifyNone(
 		t,
 		// To ignore goroutine started by the workqueue. It reports metrics
