@@ -58,8 +58,8 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 		)
 	)
 
-	if option.Config.DisableCiliumEndpointCRD {
-		h.Stopped("ciliumendpoint CRD disabled")
+	if option.Config.DisableCiliumEndpointCRD || option.Config.EnableCiliumEndpointSlice {
+		h.Stopped("ciliumendpoint CRD disabled or CES enabled")
 		scopedLog.Debug("Not running controller. CEP CRD synchronization is disabled")
 		return
 	}
