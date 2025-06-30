@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/metrics/metric"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 const (
@@ -54,6 +55,9 @@ func NewUnmanagedPodsMetric() *UnmanagedPodsMetric {
 func enableUnmanagedController(ctx context.Context, logger *slog.Logger, wg *sync.WaitGroup, clientset k8sClient.Clientset, metrics *UnmanagedPodsMetric) {
 	// These functions will block until the resources are synced with k8s.
 	watchers.CiliumEndpointsInit(ctx, wg, clientset)
+	if option.Config.EnableCiliumEndpointSlice {
+		watchers.CiliumEndpointSliceInit(ctx, wg, clientset)
+	}
 	watchers.UnmanagedPodsInit(ctx, wg, clientset)
 
 	mgr := controller.NewManager()
@@ -86,6 +90,9 @@ func enableUnmanagedController(ctx context.Context, logger *slog.Logger, wg *syn
 						continue
 					}
 					cep, exists, err := watchers.HasCE(pod.Namespace, pod.Name)
+					if option.Config.EnableCiliumEndpointSlice {
+						exists, err = watchers.HasCESWithPod(pod.Namespace, pod.Name)
+					}
 					if err != nil {
 						logger.Error(
 							"Unexpected error when getting CiliumEndpoint",
@@ -96,12 +103,19 @@ func enableUnmanagedController(ctx context.Context, logger *slog.Logger, wg *syn
 					}
 					podID := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 					if exists {
-						logger.Debug(
-							"Found managed pod due to presence of a CEP",
-							logfields.Error, err,
-							logfields.K8sPodName, podID,
-							logfields.Identity, cep.Status.ID,
-						)
+						if option.Config.EnableCiliumEndpointSlice {
+							logger.Debug(
+								"Found managed pod due to presence of a CES",
+								logfields.K8sPodName, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+							)
+						} else {
+							logger.Debug(
+								"Found managed pod due to presence of a CEP",
+								logfields.Error, err,
+								logfields.K8sPodName, podID,
+								logfields.Identity, cep.Status.ID,
+							)
+						}
 					} else {
 						countUnmanagedPods++
 						logger.Debug(
