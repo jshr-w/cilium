@@ -2809,8 +2809,9 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	// Ensure CiliumEndpointSlice is enabled only if CiliumEndpointCRD is enabled too.
 	c.EnableCiliumEndpointSlice = vp.GetBool(EnableCiliumEndpointSlice)
 	if c.EnableCiliumEndpointSlice && c.DisableCiliumEndpointCRD {
-		logging.Fatal(logger, fmt.Sprintf("Running Cilium with %s=%t requires %s set to false to enable CiliumEndpoint CRDs.",
+		logger.Warn(fmt.Sprintf("Running Cilium with %s=%t requires %s set to false to enable CiliumEndpoint CRDs, setting to false.",
 			EnableCiliumEndpointSlice, c.EnableCiliumEndpointSlice, DisableCiliumEndpointCRDName))
+		c.EnableCiliumEndpointSlice = false
 	}
 
 	// To support K8s NetworkPolicy
