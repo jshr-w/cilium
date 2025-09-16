@@ -4,6 +4,8 @@
 package ciliumendpointslice
 
 import (
+	"fmt"
+
 	"cmp"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -97,11 +99,37 @@ func NewNodeData() *NodeData {
 	}
 }
 
+func (c *CESCache) DumpState() string {
+	s := "===== CESCache =====\n"
+	s += "CEP Data\n"
+	for cep, data := range c.cepData {
+		s += fmt.Sprintf("  %s: { CES: %s, Node: %s, Labels: %s }\n", cep, data.ces, data.node, data.labels)
+	}
+	s += "CES Data\n"
+	for ces, data := range c.cesData {
+		s += fmt.Sprintf("  %s: { CEPs: %s, Namespace: %s }\n", ces, data.ceps, data.ns)
+	}
+	s += "Node Data\n"
+	for node, data := range c.nodeData {
+		s += fmt.Sprintf("  %s: { CEPs: %s, Key: %d }\n", node, data.ceps, data.key)
+	}
+	s += "Global ID Labels to CID Set\n"
+	for labels, data := range c.globalIdLabelsToCIDSet {
+		s += fmt.Sprintf("  %s: { SelectedID: %v, IDs: %s, CEPs: %s }\n", labels, data.selectedID, data.ids, data.ceps)
+	}
+	s += "CID to Global ID Labels\n"
+	for cid, labels := range c.cidToGidLabels {
+		s += fmt.Sprintf("  %v: %s\n", cid, labels)
+	}
+	return s
+}
+
 // Add CEP to cache, map to CES name and node name
 func (c *CESCache) addCEP(cepName CEPName, cesName CESName, nodeName NodeName, gidLabels Label) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	fmt.Println("addCEP called:", cepName, cesName, nodeName, gidLabels)
 	c.updateCEPInCache(cepName, nodeName, gidLabels, cesName)
 }
 
@@ -110,6 +138,7 @@ func (c *CESCache) upsertCEP(cepName CEPName, cesName CESName, nodeName NodeName
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	fmt.Println("upsertCEP called:", cepName, cesName, nodeName, gidLabels, cid)
 	c.updateCEPInCache(cepName, nodeName, gidLabels, cesName)
 	c.globalIdLabelsToCIDSet[gidLabels].setSelectedID(cid, false)
 	c.globalIdLabelsToCIDSet[gidLabels].ids.Insert(cid)
@@ -168,6 +197,7 @@ func (c *CESCache) insertNode(nodeName NodeName, encryptionKey EncryptionKey) []
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	fmt.Println("insertNode called:", nodeName, encryptionKey)
 	if _, ok := c.nodeData[nodeName]; !ok {
 		c.nodeData[nodeName] = NewNodeData()
 		c.nodeData[nodeName].key = encryptionKey
@@ -230,6 +260,7 @@ func (c *CESCache) deleteNode(nodeName NodeName) []CESKey {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	fmt.Println("deleteNode called:", nodeName)
 	if nodeData, ok := c.nodeData[nodeName]; ok {
 		for cepName := range nodeData.ceps {
 			c.cepData[cepName].node = ""
