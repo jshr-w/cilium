@@ -190,6 +190,12 @@ func (n *NodeDiscovery) updateLocalNode(ctx context.Context, ln *node.LocalNode)
 			})
 	}
 
+	// TODO(jshr-w): Ideally, add a different config option and stop overusing this one :)
+	if !option.NetworkPolicyEnabled(option.Config) {
+		n.logger.Warn("updateLocalNode: Node discovery cannot be used with network policies enabled")
+		return
+	}
+
 	if n.clientset.IsEnabled() {
 		// CRD IPAM endpoint restoration depends on the completion of this
 		// to avoid custom resource update conflicts.
