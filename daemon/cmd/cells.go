@@ -175,7 +175,8 @@ var (
 		// This fills in the initial state before it is accessed by other sub-systems.
 		// Then, it takes care of keeping selected fields (e.g., labels, annotations)
 		// synchronized with the corresponding kubernetes object.
-		cell.Provide(newLocalNodeSynchronizer),
+		// cell.Provide(newLocalNodeSynchronizer),
+		cell.Provide(node.NewNopLocalNodeSynchronizer),
 
 		// Controller provides flags and configuration related
 		// to Controller management, concurrent control loops

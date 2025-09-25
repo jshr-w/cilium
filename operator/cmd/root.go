@@ -685,7 +685,7 @@ func (legacy *legacyOnLeader) onStart(ctx cell.HookContext) error {
 			logging.Fatal(legacy.logger, "Unable to setup cilium node synchronizer", logfields.Error, err)
 		}
 
-		if operatorOption.Config.NodesGCInterval != 0 {
+		if operatorOption.Config.NodesGCInterval != 0 && option.NetworkPolicyEnabled(option.Config) {
 			operatorWatchers.RunCiliumNodeGC(legacy.ctx, &legacy.wg, legacy.clientset, ciliumNodeSynchronizer.ciliumNodeStore,
 				operatorOption.Config.NodesGCInterval, watcherLogger, legacy.workqueueMetricsProvider)
 		}
