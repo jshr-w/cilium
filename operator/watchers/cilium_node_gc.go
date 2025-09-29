@@ -22,6 +22,7 @@ import (
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -69,6 +70,12 @@ func (c *ciliumNodeGCCandidate) Delete(nodeName string) {
 // RunCiliumNodeGC performs garbage collector for cilium node resource
 func RunCiliumNodeGC(ctx context.Context, wg *sync.WaitGroup, clientset k8sClient.Clientset, ciliumNodeStore cache.Store, interval time.Duration, logger *slog.Logger,
 	mp workqueue.MetricsProvider) {
+	if option.Config.DisableCiliumNodeCRD {
+		logger.InfoContext(ctx, "Running the garbage collector only once to clean up leftover CiliumNode custom resources")
+		performCiliumNodeGCOnce(ctx, clientset.CiliumV2().CiliumNodes(), ciliumNodeStore, logger)
+		return
+	}
+
 	nodesInit(wg, clientset.Slim(), ctx.Done(), mp)
 
 	// wait for k8s nodes synced is done
@@ -157,6 +164,34 @@ func performCiliumNodeGC(ctx context.Context, client ciliumv2.CiliumNodeInterfac
 			scopedLog.InfoContext(ctx, "CiliumNode is garbage collected successfully")
 			candidateStore.Delete(nodeName)
 		}
+	}
+	return nil
+}
+
+func performCiliumNodeGCOnce(ctx context.Context, client ciliumv2.CiliumNodeInterface, ciliumNodeStore cache.Store,
+	logger *slog.Logger) error {
+	for _, nodeName := range ciliumNodeStore.ListKeys() {
+		scopedLog := logger.With(logfields.NodeName, nodeName)
+
+		obj, _, err := ciliumNodeStore.GetByKey(nodeName)
+		if err != nil {
+			scopedLog.ErrorContext(ctx, "Unable to fetch CiliumNode from store", logfields.Error, err)
+			continue
+		}
+
+		_, ok := obj.(*cilium_v2.CiliumNode)
+		if !ok {
+			scopedLog.ErrorContext(ctx, fmt.Sprintf("Object stored in store is not *cilium_v2.CiliumNode but %T", obj))
+			continue
+		}
+
+		scopedLog.InfoContext(ctx, "Perform GC for invalid CiliumNode")
+		err = client.Delete(ctx, nodeName, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
+			scopedLog.ErrorContext(ctx, "Failed to delete invalid CiliumNode", logfields.Error, err)
+			return err
+		}
+		scopedLog.InfoContext(ctx, "CiliumNode is garbage collected successfully")
 	}
 	return nil
 }

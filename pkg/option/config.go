@@ -1001,6 +1001,9 @@ const (
 
 	// IPTracingOptionType specifies what IPv4 option type should be used to extract trace information from a packet
 	IPTracingOptionType = "ip-tracing-option-type"
+
+	// DisableCiliumNodeCRD is the name of the option to disable use of the CiliumNode CRD
+	DisableCiliumNodeCRDName = "disable-cilium-node-crd"
 )
 
 // Default string arguments
@@ -1895,6 +1898,9 @@ type DaemonConfig struct {
 
 	// IPTracingOptionType determines whether to enable IP tracing, and if enabled what option type to use.
 	IPTracingOptionType uint
+
+	// DisableCiliumNodeCRD disables the use of CiliumNode CRD
+	DisableCiliumNodeCRD bool
 }
 
 var (
@@ -2589,6 +2595,7 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.BootIDFile = vp.GetString(BootIDFilename)
 	c.EnableExtendedIPProtocols = vp.GetBool(EnableExtendedIPProtocols)
 	c.IPTracingOptionType = vp.GetUint(IPTracingOptionType)
+	c.DisableCiliumNodeCRD = vp.GetBool(DisableCiliumNodeCRDName)
 
 	c.ServiceNoBackendResponse = vp.GetString(ServiceNoBackendResponse)
 	switch c.ServiceNoBackendResponse {

@@ -104,6 +104,10 @@ func (ini *localNodeSynchronizer) SyncLocalNode(ctx context.Context, store *node
 }
 
 func newLocalNodeSynchronizer(p localNodeSynchronizerParams) node.LocalNodeSynchronizer {
+	if option.Config.DisableCiliumNodeCRD {
+		return node.NewNopLocalNodeSynchronizer()
+	}
+
 	return &localNodeSynchronizer{
 		localNodeSynchronizerParams: p,
 		old:                         node.LocalNode{Local: &node.LocalNodeInfo{}},

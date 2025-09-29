@@ -386,6 +386,20 @@ func (s *ciliumNodeSynchronizer) syncHandlerConstructor(notFoundHandler, foundHa
 	}
 }
 
+func newCiliumNodeGCSynchronizer(logger *slog.Logger, clientset k8sClient.Clientset, kvstoreClient kvstore.Client, nodeManager allocator.NodeEventHandler, withKVStore bool, workqueueMetricsProvider workqueue.MetricsProvider) *ciliumNodeSynchronizer {
+	return &ciliumNodeSynchronizer{
+		logger:        logger,
+		clientset:     clientset,
+		kvstoreClient: kvstoreClient,
+		nodeManager:   nodeManager,
+		withKVStore:   withKVStore,
+
+		k8sCiliumNodesCacheSynced:    make(chan struct{}),
+		ciliumNodeManagerQueueSynced: make(chan struct{}),
+		workqueueMetricsProvider:     workqueueMetricsProvider,
+	}
+}
+
 // processNextWorkItem process all events from the workqueue.
 func (s *ciliumNodeSynchronizer) processNextWorkItem(queue workqueue.TypedRateLimitingInterface[string], syncHandler func(key string) error) bool {
 	key, quit := queue.Get()
