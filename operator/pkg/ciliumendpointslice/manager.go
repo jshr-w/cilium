@@ -181,9 +181,18 @@ func (c *defaultManager) initializeMappingForCES(ces *cilium_v2a1.CiliumEndpoint
 	return c.createCES(ces.Name, ces.Namespace)
 }
 
+func (c *slimManager) initializeMappingForCES(ces *cilium_v2a1.CiliumEndpointSlice) CESName {
+	return c.createCES(ces.Name, ces.Namespace)
+}
+
 func (c *defaultManager) initializeMappingCEPtoCES(cep *cilium_v2a1.CoreCiliumEndpoint, ns string, ces CESName) {
 	cepName := GetCEPNameFromCCEP(cep, ns)
 	c.mapping.insertCEP(cepName, ces)
+}
+
+func (c *slimManager) initializeMappingPodToNode(cepName CEPName, nodeName NodeName, ces CESName, cid CID, gidLabels Label, encryptionKey EncryptionKey) {
+	c.mapping.upsertCEP(cepName, ces, nodeName, gidLabels, cid)
+	c.mapping.insertNode(nodeName, encryptionKey)
 }
 
 func (c *defaultManager) getCEPCountInCES(ces CESName) int {
