@@ -247,6 +247,10 @@ func (c *Controller) Stop(ctx cell.HookContext) error {
 	c.wp.Close()
 	c.fastQueue.ShutDown()
 	c.standardQueue.ShutDown()
+
+	// Wake up any workers waiting on the workqueues
+	c.cond.Broadcast()
+
 	c.contextCancel()
 	return nil
 }
