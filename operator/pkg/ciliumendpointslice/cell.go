@@ -47,7 +47,7 @@ var defaultConfig = Config{
 	CESMaxCEPsInCES:           100,
 	CESSlicingMode:            fcfsMode,
 	CESDynamicRateLimitConfig: "[{\"nodes\":0,\"limit\":10,\"burst\":20}]",
-	CESControllerMode:         defaultMode,
+	CESControllerMode:         slimMode,
 }
 
 func (def Config) Flags(flags *pflag.FlagSet) {
